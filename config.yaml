@@ -1,0 +1,161 @@
+# ============================================================================
+# KRM Pipeline Configuration
+# ============================================================================
+# Single source of truth for all pipeline parameters.
+# Each phase reads its section via src/krm/config.py.
+
+pipeline:
+  raw_dir: data/raw
+  output_dir: data
+  models_dir: models
+  reports_dir: reports
+
+# ---------------------------------------------------------------------------
+# Phase 1: Vacancy Collection (HH.ru API)
+# ---------------------------------------------------------------------------
+collection:
+  date_from: "2010-01-01"
+  keywords:
+    - физик
+    - химик
+    - биолог
+    - эколог
+    - научный сотрудник
+    - лаборант
+    - материаловед
+    - геолог
+    - астроном
+    - биофизик
+    - биохимик
+    - биоинформатик
+    - генетик
+    - микробиолог
+    - фармаколог
+    - токсиколог
+    - океанолог
+    - метеоролог
+  professional_roles:
+    - 79   # Наука, образование / R&D
+  categories:
+    - 25   # Наука, образование
+  exclude_roles:
+    - 96   # ИТ, интернет, телеком
+    - 123  # Разработка ПО
+    - 124  # Системный администратор
+    - 125  # Сетевой инженер
+    - 126  # Тестировщик
+  rate_limit_rps: 2
+  max_per_search: 2000   # HH.ru API limit per search query
+
+# ---------------------------------------------------------------------------
+# Phase 2: STEM/IT Classification
+# ---------------------------------------------------------------------------
+classification:
+  model: facebook/bart-large-mnli
+  device: cpu             # "cpu" | "cuda" | "mps"
+  batch_size: 32
+  stem_threshold: 0.6
+  it_threshold: 0.6
+  interdisciplinary_threshold: 0.5
+  stem_hypothesis: "This job is a scientific research position at a laboratory or academic institution"
+  it_hypothesis: "This job is a software engineering or information technology development role"
+  admin_hypothesis: "This job is an administrative, managerial, or non-research academic role"
+
+# ---------------------------------------------------------------------------
+# Phase 3: Role Discovery (Job Title Clustering)
+# ---------------------------------------------------------------------------
+roles:
+  embedding_model: intfloat/multilingual-e5-large-instruct
+  embedding_dim: 1024
+  umap_n_components: 16
+  umap_metric: cosine
+  umap_min_dist: 0.0
+  umap_n_neighbors: 30
+  hdbscan_min_cluster_size: 15
+  hdbscan_min_samples: 5
+  hdbscan_cluster_selection_epsilon: 0.25
+  hdbscan_metric: euclidean
+  min_vacancies_per_cluster: 10
+
+# ---------------------------------------------------------------------------
+# Phase 4: Skill Extraction (ESCO + Fuzzy Matching)
+# ---------------------------------------------------------------------------
+skills:
+  esco_version: v1.2.1
+  esco_path: data/esco_skills_en.csv
+  fuzzy_threshold: 0.7
+  tfidf_max_features: 5000
+  min_skill_frequency: 3
+
+# ---------------------------------------------------------------------------
+# Phase 5: Skill-to-Axis Mapping (Zero-Shot NLI)
+# ---------------------------------------------------------------------------
+axes:
+  - id: experimental
+    label_ru: "Экспериментальный опыт"
+    hypothesis: "This skill involves hands-on laboratory or field experimental work with scientific equipment"
+  - id: domain_knowledge
+    label_ru: "Предметные знания"
+    hypothesis: "This skill involves deep theoretical or conceptual understanding of a specific scientific domain"
+  - id: management
+    label_ru: "Управление и коммуникации"
+    hypothesis: "This skill involves project management, team leadership, grant writing, or scientific presentation"
+  - id: literature
+    label_ru: "Научная литература и документация"
+    hypothesis: "This skill involves searching, reading, writing, reviewing, or organizing scientific literature and technical documentation"
+  - id: data_analysis
+    label_ru: "Анализ данных и статистика"
+    hypothesis: "This skill involves statistical analysis, quantitative data processing, measurement error evaluation, or research methodology design"
+  - id: computational
+    label_ru: "Вычислительные методы"
+    hypothesis: "This skill involves computational modeling, numerical simulation, algorithm development, or high-performance computing"
+
+# Proficiency scale (1-5)
+proficiency:
+  min: 1.0
+  max: 5.0
+  labels:
+    1: "Начальный"
+    2: "Базовый"
+    3: "Средний"
+    4: "Продвинутый"
+    5: "Экспертный"
+
+# Competency role model levels (bachelor → senior researcher)
+role_levels:
+  - id: 0
+    label: "Бакалавр"
+    weight: 0.10
+  - id: 1
+    label: "Магистр"
+    weight: 0.25
+  - id: 2
+    label: "Аспирант / МНС"
+    weight: 0.40
+  - id: 3
+    label: "Научный сотрудник"
+    weight: 0.60
+  - id: 4
+    label: "Старший научный сотрудник"
+    weight: 0.80
+  - id: 5
+    label: "Ведущий научный сотрудник"
+    weight: 0.95
+  - id: 6
+    label: "Главный научный сотрудник"
+    weight: 1.00
+
+# ---------------------------------------------------------------------------
+# Phase 7: Validation
+# ---------------------------------------------------------------------------
+testing:
+  classification_sample_size: 200
+  skill_precision_at_k: 10
+  expert_validation_roles: 3
+  bootstrap_iterations: 100
+  bootstrap_sample_fraction: 0.8
+  silhouette_target: 0.4
+  f1_target: 0.92
+  precision_target: 0.85
+  spearman_target: 0.75
+  coverage_target: 0.85
