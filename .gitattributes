@@ -1,0 +1,7 @@
+# Git LFS — track data, models, and reports
+*.parquet filter=lfs diff=lfs merge=lfs -text
+*.duckdb filter=lfs diff=lfs merge=lfs -text
+*.db filter=lfs diff=lfs merge=lfs -text
+*.pkl filter=lfs diff=lfs merge=lfs -text
+models/** filter=lfs diff=lfs merge=lfs -text
+reports/** filter=lfs diff=lfs merge=lfs -text

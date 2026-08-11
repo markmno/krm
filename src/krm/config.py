@@ -169,6 +169,36 @@ class Config:
     def n_axes(self) -> int:
         return len(self.axes)
 
+    # -- Characteristics -------------------------------------------------------
+
+    @property
+    def characteristics_model(self) -> str:
+        return self._data["characteristics"]["model"]
+
+    @property
+    def characteristics_device(self) -> str:
+        return self._data["characteristics"]["device"]
+
+    @property
+    def characteristics_batch_size(self) -> int:
+        return self._data["characteristics"]["batch_size"]
+
+    @property
+    def characteristics_confidence_threshold(self) -> float:
+        return self._data["characteristics"]["confidence_threshold"]
+
+    @property
+    def characteristics_hypotheses(self) -> list[dict[str, str]]:
+        return self._data["characteristics"]["hypotheses"]
+
+    @property
+    def characteristics_path(self) -> Path:
+        return self.output_dir / "characteristics.parquet"
+
+    @property
+    def experience_patterns(self) -> list[str]:
+        return self._data["experience"]["patterns"]
+
     # -- Testing ---------------------------------------------------------------
 
     @property

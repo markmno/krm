@@ -9,6 +9,7 @@ pipeline:
   output_dir: data
   models_dir: models
   reports_dir: reports
+  characteristics_path: data/characteristics.parquet
 
 # ---------------------------------------------------------------------------
 # Phase 1: Vacancy Collection (HH.ru API)
@@ -144,6 +145,65 @@ role_levels:
   - id: 6
     label: "Главный научный сотрудник"
     weight: 1.00
+
+# ---------------------------------------------------------------------------
+# Phase 2.5: Characteristics Extraction (Zero-Shot NLI)
+# ---------------------------------------------------------------------------
+# Extracts broad role characteristics from vacancy descriptions.
+# Characteristics are ROLE-LEVEL requirements (e.g., "laboratory work"),
+# distinct from specific SKILLS (e.g., "Python", "Excel").
+characteristics:
+  model: facebook/bart-large-mnli
+  device: cpu             # "cpu" | "cuda" | "mps"
+  batch_size: 32
+  confidence_threshold: 0.5
+  multi_label: true
+  hypotheses:
+    - id: laboratory_work
+      label_ru: "Лабораторная работа"
+      hypothesis: "This job requires hands-on work in a laboratory with scientific equipment, conducting experiments, or managing lab processes"
+    - id: field_work
+      label_ru: "Полевая работа"
+      hypothesis: "This job involves working outdoors, conducting field research, collecting samples, or doing on-site investigations"
+    - id: team_leadership
+      label_ru: "Руководство командой"
+      hypothesis: "This job requires managing a team of people, supervising subordinates, distributing tasks, or leading a research group"
+    - id: grant_writing
+      label_ru: "Написание грантов"
+      hypothesis: "This job involves writing research grant proposals, seeking funding, managing grant budgets, or reporting to funding agencies"
+    - id: publication
+      label_ru: "Публикационная активность"
+      hypothesis: "This job requires writing scientific articles, publishing in peer-reviewed journals, presenting at conferences, or reviewing manuscripts"
+    - id: teaching
+      label_ru: "Преподавание"
+      hypothesis: "This job involves teaching students, developing course materials, supervising student theses, or giving lectures and seminars"
+    - id: project_management
+      label_ru: "Управление проектами"
+      hypothesis: "This job requires planning and coordinating research projects, managing timelines, resources, budgets, or stakeholder communication"
+    - id: administrative
+      label_ru: "Административная работа"
+      hypothesis: "This job involves administrative duties, paperwork, compliance documentation, reporting to authorities, or institutional bureaucracy"
+    - id: equipment_maintenance
+      label_ru: "Обслуживание оборудования"
+      hypothesis: "This job requires maintaining, calibrating, or repairing scientific instruments, laboratory equipment, or technical systems"
+    - id: international_collaboration
+      label_ru: "Международное сотрудничество"
+      hypothesis: "This job involves working with international partners, participating in global research networks, or collaborating across countries"
+    - id: industry_partnership
+      label_ru: "Работа с индустрией"
+      hypothesis: "This job requires collaborating with industrial partners, commercializing research results, or managing technology transfer"
+    - id: regulatory_compliance
+      label_ru: "Регуляторный комплаенс"
+      hypothesis: "This job involves ensuring compliance with regulations, safety standards, quality control, GLP/GMP, or ethical review processes"
+
+# Years of experience extraction (regex-based, from vacancy description)
+experience:
+  patterns:
+    - "опыт работы.*?(\\d+)[-–]*(\\d*)\\s*(год|лет|года)"
+    - "стаж работы.*?(\\d+)[-–]*(\\d*)\\s*(год|лет|года)"
+    - "опыт.*?от\\s*(\\d+)\\s*(год|лет|года)"
+    - "(\\d+)[-–](\\d+)\\s*(год|лет|года).*?опыт"
+    - "требуемый опыт.*?(\\d+)[-–]*(\\d*)\\s*(год|лет|года)"
 
 # ---------------------------------------------------------------------------
 # Phase 7: Validation

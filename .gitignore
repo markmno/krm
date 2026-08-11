@@ -7,12 +7,10 @@ dist/
 build/
 .pytest_cache/
 .ruff_cache/
-*.db
+# SQLite WAL temp files (ignored; .db is tracked via Git LFS)
 *.db.wal
 *.db-shm
-data/*.db
 data/*.wal
-reports/
 *.png
 *.html
 *.xlsx
