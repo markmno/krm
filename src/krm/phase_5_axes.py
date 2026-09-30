@@ -1,305 +1,230 @@
-"""Phase 5: Zero-Shot NLI Skill-to-Axis Mapping.
+"""Phase 5: Taxonomy-driven skill-to-characteristic mapping.
 
-Maps extracted skills onto competency axes using zero-shot natural language
-inference (NLI). Each skill is scored against six axis hypotheses defined
-in ``config.yaml``, producing a soft assignment that allows a single skill
-to contribute to multiple competency axes.
-
-Results are aggregated per role using TF-IDF weights and normalized to
-a 1–5 proficiency scale.
+Maps each role's skills onto all seven content competency axes (including
+``t_profile`` / Кругозор) as a blend of a curated skill→axis taxonomy tag
+(exact, case-insensitive glossary membership) and cosine similarity to a
+per-axis seed-glossary centroid (``deepvk/USER-bge-m3`` embeddings).  The
+curated tag dominates (0.7) so that the taxonomy grouping
+(stats→data_analysis, computational math→computational, adjacent/erudition
+skills→Кругозор) is authoritative, while the embedding term (0.3) preserves
+semantic nuance for untagged skills.  All seven axes are globally normalized
+across roles (never within-role) to a 1–5 proficiency scale.
 
 Usage:
     from krm.config import Config
-    from krm.phase_5_axes import map_to_axes
+    from krm.phase_5_axes import map_to_characteristics
 
     config = Config()
-    axis_df = map_to_axes(config)
+    characteristic_scores = map_to_characteristics(config)
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from krm.config import Config
+from krm.lib.embeddings import Embedder
 from krm.lib.io import read_parquet, write_parquet
 
+_PROF_MIN = 1.0
+_PROF_MAX = 5.0
+_TAG_WEIGHT = 0.7
+_COS_WEIGHT = 0.3
+_MIN_ROLES_FOR_ZSCORE = 15
+_TOP_CONTRIBUTING = 3
 
-def _build_pipeline(config: Config) -> Any:
-    """Initialise the zero-shot classification pipeline.
 
-    Reuses the model configured for Phase 2 classification
-    (``classification.model``, default ``facebook/bart-large-mnli``).
+def _global_normalize(matrix: np.ndarray) -> np.ndarray:
+    """Normalize each column across roles to [1, 5] (z-score or global min-max)."""
+    n_roles = matrix.shape[0]
+    out = np.empty_like(matrix, dtype=float)
+    for j in range(matrix.shape[1]):
+        col = matrix[:, j]
+        if n_roles >= _MIN_ROLES_FOR_ZSCORE:
+            mu = float(col.mean())
+            sigma = float(col.std())
+            if sigma > 1e-12:
+                out[:, j] = np.clip(3.0 + (col - mu) / sigma, _PROF_MIN, _PROF_MAX)
+            else:
+                out[:, j] = 3.0
+        else:
+            lo = float(col.min())
+            span = float(col.max()) - lo
+            if span > 1e-12:
+                out[:, j] = _PROF_MIN + (_PROF_MAX - _PROF_MIN) * (col - lo) / span
+            else:
+                out[:, j] = 3.0
+    return out
+
+
+def _axis_centroids(
+    axes: list[str],
+    glossaries: dict[str, list[str]],
+    embedder: Embedder,
+) -> dict[str, np.ndarray]:
+    """Compute an L2-normalized centroid embedding per content axis."""
+    centroids: dict[str, np.ndarray] = {}
+    for axis in axes:
+        phrases = glossaries.get(axis, [])
+        if not phrases:
+            continue
+        centroid = embedder.encode(phrases).mean(axis=0)
+        norm = float(np.linalg.norm(centroid))
+        if norm > 1e-12:
+            centroid = centroid / norm
+        centroids[axis] = centroid
+    return centroids
+
+
+def _skill_tag_matrix(
+    skills: list[str],
+    axes: list[str],
+    glossaries: dict[str, list[str]],
+) -> np.ndarray:
+    """Build the curated skill→axis taxonomy tag matrix.
+
+    A skill is tagged to an axis iff it appears (case-insensitive exact match)
+    in that axis's seed glossary.  Skills appearing in several glossaries
+    normalize their tag mass across the tagged axes so the row sums to 1.
+    """
+    tags = np.zeros((len(skills), len(axes)), dtype=float)
+    axis_to_idx = {axis: j for j, axis in enumerate(axes)}
+    for i, skill in enumerate(skills):
+        key = skill.strip().lower()
+        hit_axes = [
+            axis
+            for axis in axes
+            if key in {phrase.strip().lower() for phrase in glossaries.get(axis, [])}
+        ]
+        if hit_axes:
+            for axis in hit_axes:
+                tags[i, axis_to_idx[axis]] = 1.0 / len(hit_axes)
+    return tags
+
+
+def _top_contributing(
+    skill_names: list[str],
+    axis_scores: np.ndarray,
+    top_k: int = _TOP_CONTRIBUTING,
+) -> list[dict[str, float]]:
+    """Return the top-*k* skills for one axis, ranked by blended score."""
+    order = np.argsort(-axis_scores)[:top_k]
+    return [
+        {"skill": skill_names[i], "contribution": round(float(axis_scores[i]), 4)}
+        for i in order
+    ]
+
+
+def _empty_characteristic_frame() -> pd.DataFrame:
+    return pd.DataFrame({
+        "role_id": pd.Series([], dtype="int64"),
+        "characteristic_id": pd.Series([], dtype="object"),
+        "proficiency": pd.Series([], dtype="float64"),
+        "top_contributing_skills": pd.Series([], dtype="object"),
+    })
+
+
+def map_to_characteristics(config: Config) -> pd.DataFrame:
+    """Map skills to competency characteristics via curated tags + embeddings.
+
+    Full pipeline:
+
+    1. Reads ``skills_per_role.parquet``.
+    2. Embeds every unique skill and every axis glossary phrase with
+       ``Embedder(model_name=config.embedding_model)`` (symmetric, no prefix).
+    3. Scores each skill against each of the 7 content axes (including
+       ``t_profile`` / Кругозор) as ``0.7 * tag + 0.3 * cosine``, where
+       ``tag`` is the curated glossary tag (normalized across tagged axes)
+       and ``cosine`` is the similarity to the axis glossary centroid.
+    4. Aggregates each role's per-axis score as the mean of its skills'
+       blended scores (length-normalized by skill count).
+    5. Globally normalizes all 7 axes (z-score, or min-max under 15 roles)
+       to [1, 5].
+    6. Writes ``characteristic_scores.parquet`` (role_id, characteristic_id,
+       proficiency, top_contributing_skills) and the skill×axis score matrix
+       ``skill_characteristic_scores.parquet``.
 
     Args:
         config: Pipeline configuration.
 
     Returns:
-        A HuggingFace ``zero-shot-classification`` pipeline.
-    """
-    from transformers import pipeline
-
-    device: str = config._data.get("classification", {}).get("device", "cpu")
-    return pipeline(
-        "zero-shot-classification",
-        model=config.classification_model,
-        device=device,
-    )
-
-
-def _score_skills(
-    unique_skills: list[str],
-    hypotheses: list[str],
-    classifier: Any,
-    batch_size: int = 32,
-) -> dict[str, dict[str, float]]:
-    """Score every unique skill against all axis hypotheses using zero-shot NLI.
-
-    Results are cached per skill so that a skill appearing in multiple
-    roles is only processed once.
-
-    Args:
-        unique_skills: Deduplicated list of skill strings.
-        hypotheses: Axis hypothesis texts from ``config.axis_hypotheses``.
-        classifier: A HuggingFace zero-shot-classification pipeline.
-        batch_size: Number of texts to process per classifier call.
-
-    Returns:
-        Nested dict ``{skill: {hypothesis: entailment_score}}``.
-    """
-    cache: dict[str, dict[str, float]] = {}
-
-    for batch_start in range(0, len(unique_skills), batch_size):
-        batch_end = min(batch_start + batch_size, len(unique_skills))
-        batch = unique_skills[batch_start:batch_end]
-
-        results: list[dict[str, Any]] = classifier(batch, hypotheses)
-
-        for skill, result in zip(batch, results):
-            cache[skill] = dict(zip(result["labels"], result["scores"]))
-
-    return cache
-
-
-def _normalize_to_proficiency(
-    raw_scores: dict[str, float],
-    min_val: float = 1.0,
-    max_val: float = 5.0,
-) -> dict[str, float]:
-    """Normalise a dict of ``{axis_label: score}`` to the proficiency scale.
-
-    Min-max normalisation is applied *within* the values of the dict
-    (i.e. across all axes for a single role), then linearly scaled to
-    [``min_val``, ``max_val``].
-
-    If all scores are identical (zero range), every axis receives the
-    midpoint of the scale.
-
-    Args:
-        raw_scores: Mapping from axis label to raw aggregated score.
-        min_val: Lower bound of the target scale (default 1.0).
-        max_val: Upper bound of the target scale (default 5.0).
-
-    Returns:
-        Normalised ``{axis_label: proficiency}`` mapping.
-    """
-    values = list(raw_scores.values())
-    v_min = min(values)
-    v_max = max(values)
-    span = v_max - v_min
-
-    if span == 0.0:
-        if v_min < 0.001:
-            return {k: min_val for k in raw_scores}
-        midpoint = (min_val + max_val) / 2.0
-        return {k: midpoint for k in raw_scores}
-
-    scale = (max_val - min_val) / span
-    return {k: min_val + (v - v_min) * scale for k, v in raw_scores.items()}
-
-
-def _top_contributing(
-    role_skills: pd.DataFrame,
-    nli_cache: dict[str, dict[str, float]],
-    axis_id: str,
-    hypothesis: str,
-    top_k: int = 3,
-) -> list[dict[str, Any]]:
-    """Return the top-*k* contributing skills for a single axis within a role.
-
-    Skills are ranked by ``tfidf_weight * nli_score[hypothesis]``.
-
-    Args:
-        role_skills: DataFrame slice for a single role (columns must include
-            ``skill`` and ``tfidf_weight``).
-        nli_cache: Pre-computed NLI scores per skill.
-        axis_id: Axis identifier (e.g. ``"experimental"``).
-        hypothesis: The hypothesis text used as the NLI label.
-        top_k: Number of top skills to return (default 3).
-
-    Returns:
-        List of ``{"skill": str, "contribution": float}`` dicts, sorted
-        by contribution descending.
-    """
-    contributions: list[dict[str, Any]] = []
-
-    for _, row in role_skills.iterrows():
-        skill: str = row["skill"]
-        weight: float = float(row["tfidf_weight"])
-        nli_score = nli_cache.get(skill, {}).get(hypothesis, 0.0)
-        contrib = weight * nli_score
-        contributions.append({"skill": skill, "contribution": float(contrib)})
-
-    contributions.sort(key=lambda x: x["contribution"], reverse=True)
-    return contributions[:top_k]
-
-
-def map_to_axes(config: Config) -> pd.DataFrame:
-    """Map skills to competency axes using zero-shot NLI and aggregate per role.
-
-    Full pipeline:
-
-    1. Reads ``skills_per_role.parquet`` from ``config.output_dir``.
-    2. Collects all unique skill strings across roles.
-    3. Loads ``facebook/bart-large-mnli`` via the HuggingFace
-       zero-shot-classification pipeline.
-    4. Scores every unique skill against the six axis hypotheses
-       defined in ``config.axes`` (results cached globally — skills
-       shared across roles are not re-processed).
-    5. For each role, aggregates axis scores as the TF-IDF-weighted
-       mean of per-skill NLI scores:
-       ``proficiency[axis] = Σ(tfidf_w * nli_score[axis]) / Σ(tfidf_w)``.
-    6. Normalises aggregated scores to a 1–5 proficiency scale via
-       min-max scaling within the role's axes.
-    7. Identifies the top-3 contributing skills per axis (by weighted
-       contribution) and stores them as JSON.
-    8. Writes ``axis_scores.parquet`` to ``config.output_dir``.
-
-    Args:
-        config: Pipeline configuration providing ``axis_hypotheses``,
-            ``axis_ids``, and ``n_axes``.
-
-    Returns:
-        DataFrame with one row per role–axis pair:
-
-        ========================== ==========================================
-        column                     description
-        ========================== ==========================================
-        ``role_id``                int — role identifier
-        ``axis_id``                str — axis code (e.g. ``"experimental"``)
-        ``proficiency``            float — normalised 1–5 proficiency score
-        ``top_contributing_skills`` str — JSON array of ``[{skill, contribution}]``
-        ========================== ==========================================
+        DataFrame with one row per role–characteristic pair (7 axes per role).
 
     Raises:
         FileNotFoundError: If ``skills_per_role.parquet`` does not exist.
     """
-    # ------------------------------------------------------------------
-    # 1. Load skills per role
-    # ------------------------------------------------------------------
-    skills_path = config.output_dir / "skills_per_role.parquet"
-    skills_df = read_parquet(skills_path)
-    print(
-        f"[Phase 5] Loaded {len(skills_df)} skill–role assignments "
-        f"from {skills_path}"
-    )
+    skills_df = read_parquet(config.output_dir / "skills_per_role.parquet")
+    characteristic_ids = config.characteristic_ids
+    content_axes = list(characteristic_ids)
+    glossaries = config.characteristic_seed_glossaries
 
-    # ------------------------------------------------------------------
-    # 2. Collect unique skills
-    # ------------------------------------------------------------------
-    unique_skills: list[str] = sorted(skills_df["skill_canonical_name"].dropna().unique().tolist())
-    print(f"[Phase 5] {len(unique_skills)} unique skills to classify")
+    unique_skills = sorted(skills_df["skill_canonical_name"].dropna().unique().tolist())
+    embedder = Embedder(model_name=config.embedding_model)
+    skill_emb_map = dict(zip(unique_skills, embedder.encode(unique_skills), strict=True))
+    centroids = _axis_centroids(content_axes, glossaries, embedder)
+    active_axes = [cid for cid in content_axes if cid in centroids]
 
-    # ------------------------------------------------------------------
-    # 3. Load NLI classifier
-    # ------------------------------------------------------------------
-    hypotheses: list[str] = config.axis_hypotheses
-    axis_ids: list[str] = config.axis_ids
-    print(f"[Phase 5] Loading NLI model: {config.classification_model}")
-    classifier = _build_pipeline(config)
-    print(f"[Phase 5] {len(hypotheses)} axis hypotheses loaded")
+    tag_matrix = _skill_tag_matrix(unique_skills, active_axes, glossaries)
+    if unique_skills and active_axes:
+        skill_matrix = np.stack([skill_emb_map[s] for s in unique_skills])
+        centroid_matrix = np.stack([centroids[c] for c in active_axes])
+        cosine_matrix = skill_matrix @ centroid_matrix.T
+    else:
+        cosine_matrix = np.zeros((len(unique_skills), len(active_axes)), dtype=float)
+    skill_axis_scores = _TAG_WEIGHT * tag_matrix + _COS_WEIGHT * cosine_matrix
 
-    # ------------------------------------------------------------------
-    # 4. Score all unique skills (with global cache)
-    # ------------------------------------------------------------------
-    nli_cache = _score_skills(unique_skills, hypotheses, classifier)
+    role_ids = sorted(skills_df["role_id"].unique().tolist())
+    raw_matrix = np.zeros((len(role_ids), len(active_axes)), dtype=float)
+    role_skill_indices: dict[int, list[int]] = {}
+    skill_to_idx = {skill: i for i, skill in enumerate(unique_skills)}
+    for r, role_id in enumerate(role_ids):
+        names = skills_df.loc[skills_df["role_id"] == role_id, "skill_canonical_name"].tolist()
+        indices = [skill_to_idx[n] for n in names if n in skill_to_idx]
+        role_skill_indices[role_id] = indices
+        if indices:
+            raw_matrix[r] = skill_axis_scores[indices].mean(axis=0)
 
-    # ------------------------------------------------------------------
-    # 5. Aggregate per role
-    # ------------------------------------------------------------------
-    role_ids_sorted: list[int] = sorted(skills_df["role_id"].unique().tolist())
-    axis_records: list[dict[str, Any]] = []
+    norm_matrix = _global_normalize(raw_matrix) if raw_matrix.size else raw_matrix
 
-    for role_id in role_ids_sorted:
-        role_mask = skills_df["role_id"] == role_id
-        role_skills = skills_df[role_mask]
-
-        # --- Weighted sum for each axis ---
-        raw_axis_scores: dict[str, float] = {}
-        total_weight: float = float(role_skills["tfidf_weight"].sum())
-
-        if total_weight == 0.0:
-            # Edge case: no meaningful weights — assign midpoint.
-            for axis_id, hypothesis in zip(axis_ids, hypotheses):
-                axis_records.append({
-                    "role_id": int(role_id),
-                    "axis_id": axis_id,
-                    "proficiency": 3.0,
-                    "top_contributing_skills": json.dumps([], ensure_ascii=False),
-                })
-            continue
-
-        for axis_id, hypothesis in zip(axis_ids, hypotheses):
-            weighted_sum: float = 0.0
-            for _, row in role_skills.iterrows():
-                skill: str = row["skill_canonical_name"]
-                weight: float = float(row["tfidf_weight"])
-                nli_score = nli_cache.get(skill, {}).get(hypothesis, 0.0)
-                weighted_sum += weight * nli_score
-            raw_axis_scores[axis_id] = weighted_sum / total_weight
-
-        # --- Normalise to 1–5 scale ---
-        norm_scores = _normalize_to_proficiency(raw_axis_scores)
-
-        # --- Top contributing skills per axis ---
-        for axis_id, hypothesis in zip(axis_ids, hypotheses):
-            top_skills = _top_contributing(
-                role_skills,
-                nli_cache,
-                axis_id,
-                hypothesis,
-                top_k=3,
-            )
-            axis_records.append({
+    records: list[dict[str, object]] = []
+    for r, role_id in enumerate(role_ids):
+        indices = role_skill_indices[role_id]
+        names = [unique_skills[i] for i in indices]
+        role_scores = skill_axis_scores[indices] if indices else np.zeros((0, len(active_axes)))
+        for j, axis in enumerate(active_axes):
+            top = _top_contributing(names, role_scores[:, j]) if indices else []
+            records.append({
                 "role_id": int(role_id),
-                "axis_id": axis_id,
-                "proficiency": round(norm_scores[axis_id], 4),
-                "top_contributing_skills": json.dumps(
-                    top_skills, ensure_ascii=False
-                ),
+                "characteristic_id": axis,
+                "proficiency": round(float(norm_matrix[r, j]), 4),
+                "top_contributing_skills": json.dumps(top, ensure_ascii=False),
             })
 
-    # ------------------------------------------------------------------
-    # 6. Build output DataFrame
-    # ------------------------------------------------------------------
-    axis_df = pd.DataFrame(axis_records)
-    # Ensure consistent column ordering.
-    axis_df = axis_df[[
-        "role_id",
-        "axis_id",
-        "proficiency",
-        "top_contributing_skills",
-    ]]
-
-    # ------------------------------------------------------------------
-    # 7. Write output
-    # ------------------------------------------------------------------
-    output_path = config.output_dir / "axis_scores.parquet"
-    write_parquet(axis_df, output_path)
-    print(
-        f"[Phase 5] Wrote {len(axis_df)} role–axis scores to {output_path}"
+    characteristic_df = _empty_characteristic_frame() if not records else pd.DataFrame(
+        records, columns=[
+            "role_id", "characteristic_id", "proficiency", "top_contributing_skills",
+        ]
     )
+    write_parquet(characteristic_df, config.characteristic_scores_path)
 
-    return axis_df
+    matrix_rows = []
+    for i, skill in enumerate(unique_skills):
+        for j, axis in enumerate(active_axes):
+            matrix_rows.append({
+                "skill_canonical_name": skill,
+                "characteristic_id": axis,
+                "nli_score": round(float(skill_axis_scores[i, j]), 4),
+            })
+    matrix_df = pd.DataFrame(
+        matrix_rows, columns=["skill_canonical_name", "characteristic_id", "nli_score"]
+    )
+    write_parquet(matrix_df, config.skill_characteristic_scores_path)
+
+    print(
+        f"[Phase 5] Wrote {len(characteristic_df)} role–characteristic scores "
+        f"to {config.characteristic_scores_path}"
+    )
+    return characteristic_df

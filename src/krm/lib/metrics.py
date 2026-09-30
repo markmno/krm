@@ -112,9 +112,9 @@ def compute_spearman_correlation(
     model_scores: list[list[float]],
     expert_scores: list[list[float]],
 ) -> dict[str, float]:
-    """Spearman correlation between model and expert axis scores.
+    """Spearman correlation between model and expert characteristic scores.
 
-    Input: two lists of shape (n_roles, n_axes).
+    Input: two lists of shape (n_roles, n_characteristics).
     """
     model_flat = [v for row in model_scores for v in row]
     expert_flat = [v for row in expert_scores for v in row]

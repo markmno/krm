@@ -100,7 +100,7 @@ fixtures/
 ├── raw_vacancies.parquet          # 50 реальных вакансий (анонимизированных)
 ├── expected_classification.csv    # Ручная разметка STEM/IT/non-STEM
 ├── expected_roles.csv             # Ручная разметка: должность -> роль
-├── expected_axis_scores.csv       # Экспертные оценки: роль -> 6 осей
+├── expected_axis_scores.csv       # Экспертные оценки: роль -> 7 осей
 └── esco_skills_sample.csv         # Подмножество ESCO (500 навыков)
 ```
 

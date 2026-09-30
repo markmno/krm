@@ -4,7 +4,7 @@ Validates output quality at every pipeline stage against defined metrics:
 - Phase 2: F1 score on hand-labelled classification sample
 - Phase 3: Silhouette score, Davies-Bouldin index, bootstrap ARI stability
 - Phase 4: Precision@k on expert-labelled skill sets
-- Phase 5: Spearman ρ correlation vs expert axis scores
+- Phase 5: Spearman ρ correlation vs expert characteristic scores
 - Integration: Coverage ratio (vacancies with complete model)
 
 Writes a structured `reports/validation_report.md` and `reports/metrics.json`.
@@ -104,11 +104,11 @@ def _validate_phase_4_skills(config: Config) -> dict[str, Any]:
     }
 
 
-def _validate_phase_5_axes(config: Config) -> dict[str, Any]:
-    """Validate axis_scores: coverage and distribution."""
-    df = _safe_read(config.axis_scores_path, "axis_scores.parquet")
+def _validate_phase_5_characteristics(config: Config) -> dict[str, Any]:
+    """Validate characteristic_scores: coverage and distribution."""
+    df = _safe_read(config.characteristic_scores_path, "characteristic_scores.parquet")
     if df is None:
-        return {"status": "skipped", "reason": "axis_scores.parquet not found"}
+        return {"status": "skipped", "reason": "characteristic_scores.parquet not found"}
 
     if "proficiency" not in df.columns:
         return {"total_rows": len(df), "error": "proficiency column missing"}
@@ -118,12 +118,14 @@ def _validate_phase_5_axes(config: Config) -> dict[str, Any]:
         return {"total_rows": len(df), "error": "no valid proficiency scores"}
 
     return {
-        "total_axis_scores": len(df),
+        "total_characteristic_scores": len(df),
         "roles_covered": int(df["role_id"].nunique() if "role_id" in df.columns else 0),
-        "axes_covered": int(df["axis_id"].nunique() if "axis_id" in df.columns else 0),
+        "characteristics_covered": int(
+            df["characteristic_id"].nunique() if "characteristic_id" in df.columns else 0
+        ),
         "proficiency_range": [float(round(prof.min(), 2)), float(round(prof.max(), 2))],
         "proficiency_mean": float(round(prof.mean(), 2)),
-        "spearman_target": ">= 0.75 (requires expert-labelled axis scores) — not computed automatically",
+        "spearman_target": ">= 0.75 (requires expert-labelled characteristic scores) — not computed automatically",
     }
 
 
@@ -141,7 +143,14 @@ def _validate_phase_6_models(config: Config) -> dict[str, Any]:
     for jf in json_files:
         try:
             data = json.loads(jf.read_text(encoding="utf-8"))
-            required = {"role_id", "role_label", "axes"}
+            required = {
+                "role_id",
+                "role_label",
+                "characteristics",
+                "soft_competences",
+                "experience",
+                "skills",
+            }
             missing = required - set(data.keys())
             if missing:
                 invalid += 1
@@ -166,7 +175,10 @@ def _validate_integration(config: Config) -> dict[str, Any]:
     classified = _safe_read(config.classified_path, "classified.parquet")
     roles = _safe_read(config.roles_path, "roles.parquet")
     skills = _safe_read(config.skills_per_role_path, "skills_per_role.parquet")
-    axes = _safe_read(config.axis_scores_path, "axis_scores.parquet")
+    characteristics = _safe_read(
+        config.characteristic_scores_path, "characteristic_scores.parquet"
+    )
+    soft = _safe_read(config.soft_scores_path, "soft_scores.parquet")
 
     result: dict[str, Any] = {}
 
@@ -182,11 +194,30 @@ def _validate_integration(config: Config) -> dict[str, Any]:
     if skills is not None and "role_id" in skills.columns:
         result["roles_with_skills"] = int(skills["role_id"].nunique())
 
-    if axes is not None and "role_id" in axes.columns:
-        result["roles_with_axis_scores"] = int(axes["role_id"].nunique())
-        expected_axes = 6
-        axis_coverage = {rid: int(grp["axis_id"].nunique()) for rid, grp in axes.groupby("role_id")}
-        result["roles_with_complete_axes"] = sum(1 for v in axis_coverage.values() if v == expected_axes)
+    if characteristics is not None and "role_id" in characteristics.columns:
+        result["roles_with_characteristic_scores"] = int(characteristics["role_id"].nunique())
+        expected_characteristics = 7
+        characteristic_coverage = {
+            rid: int(grp["characteristic_id"].nunique())
+            for rid, grp in characteristics.groupby("role_id")
+        }
+        result["roles_with_complete_characteristics"] = sum(
+            1 for v in characteristic_coverage.values() if v == expected_characteristics
+        )
+
+    expected_soft_axes = 4
+    if soft is not None and "role_id" in soft.columns and "soft_id" in soft.columns:
+        result["roles_with_soft_scores"] = int(soft["role_id"].nunique())
+        soft_coverage = {
+            rid: int(grp["soft_id"].nunique())
+            for rid, grp in soft.groupby("role_id")
+        }
+        result["roles_with_complete_soft_scores"] = sum(
+            1 for v in soft_coverage.values() if v == expected_soft_axes
+        )
+    else:
+        result["roles_with_soft_scores"] = 0
+        result["roles_with_complete_soft_scores"] = 0
 
     return result
 
@@ -203,7 +234,7 @@ def validate(config: Config) -> dict[str, Any]:
             "phase_2_classification": _validate_phase_2_classification(config),
             "phase_3_roles": _validate_phase_3_roles(config),
             "phase_4_skills": _validate_phase_4_skills(config),
-            "phase_5_axes": _validate_phase_5_axes(config),
+            "phase_5_characteristics": _validate_phase_5_characteristics(config),
             "phase_6_models": _validate_phase_6_models(config),
             "integration": _validate_integration(config),
         },

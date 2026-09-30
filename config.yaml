@@ -9,7 +9,92 @@ pipeline:
   output_dir: data
   models_dir: models
   reports_dir: reports
-  characteristics_path: data/characteristics.parquet
+
+paths:
+  characteristics: data/characteristics.parquet
+  characteristic_scores: data/characteristic_scores.parquet
+
+# ---------------------------------------------------------------------------
+# Phase 0: Historical Data Collection (Wayback Machine + Open Data APIs)
+# ---------------------------------------------------------------------------
+phase0:
+  output_dir: data/phase0
+  db_path: data/phase0/historical.duckdb
+  census_cache_dir: data/phase0/census
+
+  cdx:
+    rate_limit_rps: 1
+    max_per_query: 150000
+    endpoint: "https://web.archive.org/cdx/search/cdx"
+
+  hhru_wayback:
+    enabled: true
+    url_patterns:
+      legacy: "hh.ru/vacancy*.do"        # 2010-2011
+      modern: "hh.ru/vacancy/[0-9]*"      # 2012+
+    years: [2017, 2026]
+    stem_keywords:
+      - физик
+      - химик
+      - биолог
+      - эколог
+      - научный сотрудник
+      - лаборант
+      - материаловед
+      - геолог
+      - биофизик
+      - биохимик
+      - биоинформатик
+      - генетик
+      - микробиолог
+      - фармаколог
+      - токсиколог
+      - океанолог
+      - метеоролог
+
+  linkedin_wayback:
+    enabled: true
+    url_patterns:
+      legacy: "linkedin.com/jobs2/view/*"     # 2013-2016
+      modern: "linkedin.com/jobs/view/*"       # 2019+
+    languages: ["en"]
+    stem_keywords:
+      - scientist
+      - researcher
+      - chemist
+      - biologist
+      - physicist
+      - bioinformatician
+      - computational
+      - laboratory
+      - lab technician
+      - pharmacologist
+      - geneticist
+      - microbiologist
+      - materials scientist
+      - geologist
+      - environmental scientist
+      - data scientist
+
+  trudvsem:
+    enabled: true
+    base_url: "https://opendata.trudvsem.ru/api/v1"
+    date_from: "2017-01-01"
+    date_to: "2025-12-31"
+    rate_limit_rps: 1
+
+  rostud:
+    enabled: false
+    dataset_path: data/phase0/rostud_raw
+
+  telegram:
+    enabled: false
+    api_id: 0
+    api_hash: ""
+    session_name: "krm"
+    channels: []
+    keywords: []
+    limit_per_channel: 200
 
 # ---------------------------------------------------------------------------
 # Phase 1: Vacancy Collection (HH.ru API)
@@ -20,21 +105,6 @@ collection:
     - физик
     - химик
     - биолог
-    - эколог
-    - научный сотрудник
-    - лаборант
-    - материаловед
-    - геолог
-    - астроном
-    - биофизик
-    - биохимик
-    - биоинформатик
-    - генетик
-    - микробиолог
-    - фармаколог
-    - токсиколог
-    - океанолог
-    - метеоролог
   professional_roles:
     - 79   # Наука, образование / R&D
   categories:
@@ -47,13 +117,232 @@ collection:
     - 126  # Тестировщик
   rate_limit_rps: 2
   max_per_search: 2000   # HH.ru API limit per search query
+  http_proxy: ""         # e.g. "http://user:pass@host:port" to bypass hh.ru IP blocks
+
+  # Vacancy-title substrings to drop at collection time (case-insensitive).
+  # Removes doctors, ecologists and blue-collar/service staff while keeping
+  # research-adjacent roles (лаборант, техник, помощник stay).
+  exclude_terms:
+    # врачи / медицина
+    - врач
+    - терапевт
+    - хирург
+    - стоматолог
+    - педиатр
+    - невролог
+    - кардиолог
+    - онколог
+    - дерматолог
+    - офтальмолог
+    - гинеколог
+    - уролог
+    - психиатр
+    - медсестра
+    - фельдшер
+    - клиник
+    - пациент
+    - аптек
+    - фармацевт
+    - провизор
+    # экологи
+    - эколог
+    - окружающей среды
+    - природоохран
+    - заповедник
+    # образование / преподавание
+    - учитель
+    - преподаватель
+    - педагог
+    - репетитор
+    - воспитатель
+    # рабочие / сервис
+    - рабочий
+    - разнорабочий
+    - слесарь
+    - монтажник
+    - сварщик
+    - токарь
+    - фрезеровщик
+    - электрик
+    - сантехник
+    - строитель
+    - грузчик
+    - водитель
+    - уборщик
+    - кладовщик
+    - продавец
+    - кассир
+    - курьер
+    - охранник
+    - повар
+    - официант
+
+# ---------------------------------------------------------------------------
+# Domain-specific collection (3 separate databases)
+# ---------------------------------------------------------------------------
+domains:
+  physics:
+    name: "Физика"
+    db_path: "data/physics.duckdb"
+    keywords:
+      - физик
+      - физик-теоретик
+      - физик-экспериментатор
+      - физик-ядерщик
+      - физик-оптик
+      - теоретическая физика
+      - математическая физика
+      - квантовая физика
+      - квантовая механика
+      - квантовая оптика
+      - квантовая теория
+      - квантовая теория поля
+      - квантовая информация
+      - квантовые вычисления
+      - физика плазмы
+      - физика высоких энергий
+      - физика элементарных частиц
+      - ядерная физика
+      - физика конденсированного состояния
+      - физика твёрдого тела
+      - физика полупроводников
+      - атомная физика
+      - молекулярная физика
+      - статистическая физика
+      - термодинамика
+      - оптика
+      - лазерная физика
+      - фотоника
+      - оптоэлектроника
+      - спектроскопия
+      - акустика
+      - радиофизика
+      - радиоэлектроника
+      - физическая электроника
+      - электрофизика
+      - физика низких температур
+      - криофизика
+      - сверхпроводимость
+      - физика магнитных явлений
+      - нанофизика
+      - нанотехнологии
+      - физика ускорителей
+      - ускорительная техника
+      - теплофизика
+      - гидродинамика
+      - аэродинамика
+      - газодинамика
+      - механика сплошных сред
+      - электродинамика
+      - астрофизика
+      - космология
+      - астрономия
+      - биофизика
+      - физика полимеров
+      - физика материалов
+      - химическая физика
+      - физика атмосферы
+      - физика океана
+      - прикладная физика
+      - техническая физика
+      - инженерная физика
+  biology:
+    name: "Биология"
+    db_path: "data/biology.duckdb"
+    keywords:
+      - биолог
+      - биолог-исследователь
+      - молекулярный биолог
+      - клеточный биолог
+      - молекулярная биология
+      - клеточная биология
+      - цитология
+      - гистология
+      - генетика
+      - геномика
+      - молекулярная генетика
+      - генная инженерия
+      - биоинформатика
+      - биохимия
+      - биофизика
+      - микробиология
+      - бактериология
+      - вирусология
+      - микология
+      - иммунология
+      - биотехнология
+      - биотехника
+      - биоинженерия
+      - синтетическая биология
+      - протеомика
+      - транскриптомика
+      - метаболомика
+      - энзимология
+      - физиология
+      - нейробиология
+      - нейрофизиология
+      - биология развития
+      - эмбриология
+      - криобиология
+      - бионанотехнологии
+      - биохимик
+      - генетик
+      - микробиолог
+      - вирусолог
+      - иммунолог
+      - биофизик
+      - биотехнолог
+      - биоинженер
+      - биоинформатик
+  chemistry:
+    name: "Химия"
+    db_path: "data/chemistry.duckdb"
+    keywords:
+      - химик
+      - химик-аналитик
+      - химик-технолог
+      - химик-исследователь
+      - химик-органик
+      - химик-неорганик
+      - неорганическая химия
+      - органическая химия
+      - аналитическая химия
+      - физическая химия
+      - химия полимеров
+      - высокомолекулярные соединения
+      - элементоорганическая химия
+      - металлоорганическая химия
+      - координационная химия
+      - химия высоких энергий
+      - радиационная химия
+      - биоорганическая химия
+      - коллоидная химия
+      - нефтехимия
+      - радиохимия
+      - кинетика
+      - катализ
+      - квантовая химия
+      - вычислительная химия
+      - хемоинформатика
+      - инфохимия
+      - химия твёрдого тела
+      - кристаллохимия
+      - химия материалов
+      - нанохимия
+      - электрохимия
+      - фотохимия
+      - термохимия
+      - супрамолекулярная химия
+      - химическая технология
+      - материаловедение
+      - химическая кинетика
 
 # ---------------------------------------------------------------------------
 # Phase 2: STEM/IT Classification
 # ---------------------------------------------------------------------------
 classification:
   model: facebook/bart-large-mnli
-  device: cpu             # "cpu" | "cuda" | "mps"
+  device: cuda             # "cpu" | "cuda" | "mps"
   batch_size: 32
   stem_threshold: 0.6
   it_threshold: 0.6
@@ -66,50 +355,37 @@ classification:
 # Phase 3: Role Discovery (Job Title Clustering)
 # ---------------------------------------------------------------------------
 roles:
-  embedding_model: intfloat/multilingual-e5-large-instruct
+  embedding_model: deepvk/USER-bge-m3
   embedding_dim: 1024
   umap_n_components: 16
   umap_metric: cosine
   umap_min_dist: 0.0
   umap_n_neighbors: 30
-  hdbscan_min_cluster_size: 15
+  hdbscan_min_cluster_size: 10
   hdbscan_min_samples: 5
   hdbscan_cluster_selection_epsilon: 0.25
   hdbscan_metric: euclidean
   min_vacancies_per_cluster: 10
 
 # ---------------------------------------------------------------------------
-# Phase 4: Skill Extraction (ESCO + Fuzzy Matching)
+# Phase 2b / Phase 4: Skill Extraction (data-driven, no ESCO)
 # ---------------------------------------------------------------------------
 skills:
-  esco_version: v1.2.1
-  esco_path: data/esco_skills_en.csv
-  fuzzy_threshold: 0.7
   tfidf_max_features: 5000
   min_skill_frequency: 3
 
-# ---------------------------------------------------------------------------
-# Phase 5: Skill-to-Axis Mapping (Zero-Shot NLI)
-# ---------------------------------------------------------------------------
-axes:
-  - id: experimental
-    label_ru: "Экспериментальный опыт"
-    hypothesis: "This skill involves hands-on laboratory or field experimental work with scientific equipment"
-  - id: domain_knowledge
-    label_ru: "Предметные знания"
-    hypothesis: "This skill involves deep theoretical or conceptual understanding of a specific scientific domain"
-  - id: management
-    label_ru: "Управление и коммуникации"
-    hypothesis: "This skill involves project management, team leadership, grant writing, or scientific presentation"
-  - id: literature
-    label_ru: "Научная литература и документация"
-    hypothesis: "This skill involves searching, reading, writing, reviewing, or organizing scientific literature and technical documentation"
-  - id: data_analysis
-    label_ru: "Анализ данных и статистика"
-    hypothesis: "This skill involves statistical analysis, quantitative data processing, measurement error evaluation, or research methodology design"
-  - id: computational
-    label_ru: "Вычислительные методы"
-    hypothesis: "This skill involves computational modeling, numerical simulation, algorithm development, or high-performance computing"
+# ESCO is deprecated — skills are now extracted from vacancy descriptions
+# using Russian NLP (pymorphy3 + natasha) and embedding deduplication.
+# See: src/krm/phase_2b_extract_skills.py (Phase 2b)
+#       src/krm/phase_4_skills.py (Phase 4, rewritten)
+
+skill_extraction:
+  min_phrase_length: 2
+  max_phrase_length: 4
+  similarity_threshold: 0.85   # cosine similarity for embedding deduplication
+  min_doc_frequency: 5          # minimum vacancies mentioning a skill to keep it
+  max_skills_per_vacancy: 30
+  embedding_model: deepvk/USER-bge-m3  # symmetric, Russian-tuned, no prefix needed
 
 # Proficiency scale (1-5)
 proficiency:
@@ -147,63 +423,428 @@ role_levels:
     weight: 1.00
 
 # ---------------------------------------------------------------------------
-# Phase 2.5: Characteristics Extraction (Zero-Shot NLI)
+# Phase 2.5 & Phase 5: Unified Characteristics (Zero-Shot NLI)
 # ---------------------------------------------------------------------------
-# Extracts broad role characteristics from vacancy descriptions.
-# Characteristics are ROLE-LEVEL requirements (e.g., "laboratory work"),
-# distinct from specific SKILLS (e.g., "Python", "Excel").
+# Seven competency characteristics for both vacancy-level extraction (Phase 2.5)
+# and skill-to-characteristic mapping (Phase 5).  Each hypothesis is tagged with
+# D&D-style skill categories that link it to related ESCO skill clusters.
 characteristics:
   model: facebook/bart-large-mnli
-  device: cpu             # "cpu" | "cuda" | "mps"
+  device: cuda             # "cpu" | "cuda" | "mps"
   batch_size: 32
-  confidence_threshold: 0.5
-  multi_label: true
+  confidence_threshold: 0.3
   hypotheses:
-    - id: laboratory_work
-      label_ru: "Лабораторная работа"
-      hypothesis: "This job requires hands-on work in a laboratory with scientific equipment, conducting experiments, or managing lab processes"
-    - id: field_work
-      label_ru: "Полевая работа"
-      hypothesis: "This job involves working outdoors, conducting field research, collecting samples, or doing on-site investigations"
-    - id: team_leadership
-      label_ru: "Руководство командой"
-      hypothesis: "This job requires managing a team of people, supervising subordinates, distributing tasks, or leading a research group"
-    - id: grant_writing
-      label_ru: "Написание грантов"
-      hypothesis: "This job involves writing research grant proposals, seeking funding, managing grant budgets, or reporting to funding agencies"
-    - id: publication
-      label_ru: "Публикационная активность"
-      hypothesis: "This job requires writing scientific articles, publishing in peer-reviewed journals, presenting at conferences, or reviewing manuscripts"
-    - id: teaching
-      label_ru: "Преподавание"
-      hypothesis: "This job involves teaching students, developing course materials, supervising student theses, or giving lectures and seminars"
-    - id: project_management
-      label_ru: "Управление проектами"
-      hypothesis: "This job requires planning and coordinating research projects, managing timelines, resources, budgets, or stakeholder communication"
-    - id: administrative
-      label_ru: "Административная работа"
-      hypothesis: "This job involves administrative duties, paperwork, compliance documentation, reporting to authorities, or institutional bureaucracy"
-    - id: equipment_maintenance
-      label_ru: "Обслуживание оборудования"
-      hypothesis: "This job requires maintaining, calibrating, or repairing scientific instruments, laboratory equipment, or technical systems"
-    - id: international_collaboration
-      label_ru: "Международное сотрудничество"
-      hypothesis: "This job involves working with international partners, participating in global research networks, or collaborating across countries"
-    - id: industry_partnership
-      label_ru: "Работа с индустрией"
-      hypothesis: "This job requires collaborating with industrial partners, commercializing research results, or managing technology transfer"
-    - id: regulatory_compliance
-      label_ru: "Регуляторный комплаенс"
-      hypothesis: "This job involves ensuring compliance with regulations, safety standards, quality control, GLP/GMP, or ethical review processes"
+    - id: domain_knowledge
+      label_ru: Доменная база
+      label_en: Domain Knowledge
+      hypothesis: "This skill requires deep theoretical or applied knowledge in a specific scientific or technical domain."
+      skill_category_triggers:
+        - Фундаментальная физика и математика
+        - Медико-биологические знания
+      seed_glossaries:
+        - квантовая механика
+        - молекулярная биология
+        - органическая химия
+        - теоретическая физика
+        - термодинамика
+        - генетика
+        - биохимия
+        - материаловедение
+        - кристаллография
+        - физиология
+        - клеточная биология
+        - геномика
+        - транскриптомика
+        - биология лабораторных методов
+        - стандарты лаборатории
+        - методики исследований
+        - регламенты лаборатории
+        - биотехнология
+        - микробиология
+        - генная инженерия
+        - биология развития
+        - методология исследований
+        - систематика
+        - эволюционная биология
+        - биостатистика
+        - эпидемиология
+        - модели данных
+        - клинические исследования
+        - физика конденсированного состояния
+        - физика твёрдого тела
+        - физика низких температур
+        - квантовая теория поля
+        - физика высоких энергий
+        - статистическая физика
+        - математическая физика
+        - ускорительная техника
+        - детекторы частиц
+        - радиофизика
+        - физическая электроника
+        - вычислительная физика
+        - численные методы физики
+        - модели физических процессов
+        - квантовые технологии
+        - научная методология
+        - история и методология физики
+        - аналитическая химия
+        - физическая химия
+        - неорганическая химия
+        - химическая метрология
+        - синтетическая химия
+        - металлоорганическая химия
+        - механизмы реакций
+        - химическая технология
+        - химия полимеров
+        - нефтехимия
+        - катализ
+        - квантовая химия
+        - вычислительная химия
+        - строение вещества
+    - id: experimental
+      label_ru: Эксперимент
+      label_en: Experimental Work
+      hypothesis: "This skill involves hands-on laboratory or field experimental work with equipment, organisms, or materials."
+      skill_category_triggers:
+        - Экспериментальные методы и оборудование
+        - Биологические и полевые исследования
+        - Химический синтез и материаловедение
+      seed_glossaries:
+        - проведение экспериментов
+        - лабораторная работа
+        - измерения
+        - пробоподготовка
+        - микроскопия
+        - спектроскопия
+        - хроматография
+        - культивирование клеток
+        - полевые исследования
+        - настройка оборудования
+        - ПЦР
+        - вестерн-блоттинг
+        - электрофорез
+        - подготовка образцов
+        - секвенирование
+        - выделение ДНК/РНК
+        - понимание лабораторных методик
+        - эксплуатация оборудования
+        - техника безопасности
+        - контроль соблюдения методик
+        - биореакторы
+        - ферментация
+        - культивирование микроорганизмов
+        - постановка экспериментов
+        - работа с образцами
+        - гистология
+        - понимание биологических методик
+        - сбор данных
+        - стандартизация проб
+        - вакуумная техника
+        - криогенные установки
+        - лазерная спектроскопия
+        - измерительные стенды
+        - понимание экспериментальных методик
+        - сопоставление с экспериментом
+        - знание детекторной физики
+        - анализ экспериментальных данных
+        - сборка экспериментальных установок
+        - настройка детекторов
+        - вакуумные системы
+        - криогеника
+        - работа с реальными данными
+        - стандартизация данных
+        - контроль методик
+        - стандартизация измерений
+        - масс-спектрометрия
+        - спектрофотометрия
+        - титриметрия
+        - органический синтез
+        - работа в инертной атмосфере
+        - колоночная хроматография
+        - тонкослойная хроматография
+        - масштабирование синтеза
+        - пилотные установки
+        - контроль технологического процесса
+        - оптимизация условий реакции
+        - работа с базами соединений
+        - стандартизация методик
+    - id: data_analysis
+      label_ru: Анализ данных
+      label_en: Data Analysis
+      hypothesis: "This skill involves analyzing data, performing statistical tests, or applying quantitative methods."
+      skill_category_triggers:
+        - Анализ данных
+      seed_glossaries:
+        - статистический анализ
+        - обработка данных
+        - регрессия
+        - визуализация данных
+        - анализ временных рядов
+        - проверка гипотез
+        - статистические тесты
+        - количественный анализ
+        - табличные данные
+        - статистическая обработка
+        - анализ экспрессии генов
+        - обработка экспериментальных данных
+        - планирование эксперимента (DoE)
+        - машинное обучение
+        - анализ RNA-seq
+        - дифференциальная экспрессия
+        - контроль качества данных
+        - Excel
+        - метрики процессов
+        - отчётность по KPI
+        - анализ биопроцессов
+        - статистика
+        - мониторинг параметров
+        - оптимизация процессов
+        - метаанализ
+        - обработка литературных данных
+        - библиометрия
+        - статистическое моделирование
+        - анализ больших данных
+        - байесовская статистика
+        - калибровка аппаратуры
+        - анализ погрешностей
+        - аналитическое моделирование
+        - фиттирование данных
+        - верификация моделей
+        - анализ точности
+        - обработка сигналов
+        - калибровка
+        - статистика измерений
+        - байесовские методы
+        - анализ публикационной активности
+        - обработка результатов анализа
+        - валидация методик
+        - калибровка приборов
+        - интерпретация спектров
+        - анализ чистоты
+        - контроль выхода реакции
+        - анализ технологических данных
+        - QSAR-моделирование
+        - прогнозирование свойств
+    - id: computational
+      label_ru: Вычислительные методы
+      label_en: Computational Methods
+      hypothesis: "This skill involves computational modeling, programming, algorithm development, or numerical methods."
+      skill_category_triggers:
+        - Программирование и IT
+        - Вычислительное моделирование
+      seed_glossaries:
+        - численное моделирование
+        - программирование
+        - алгоритмы
+        - машинное обучение
+        - HPC
+        - высокопроизводительные вычисления
+        - компьютерное моделирование
+        - оптимизация кода
+        - Python
+        - симуляция
+        - R
+        - ImageJ
+        - базы данных последовательностей
+        - Snakemake
+        - выравнивание последовательностей
+        - Bioconductor
+        - системы учёта
+        - ERP
+        - базы данных
+        - CRM-системы
+        - моделирование биопроцессов
+        - SCADA-системы
+        - MATLAB
+        - LaTeX
+        - Zotero
+        - базы публикаций
+        - EndNote
+        - SQL
+        - pandas/scikit-learn
+        - LabVIEW
+        - C++
+        - Mathematica
+        - численные методы
+        - автоматизация измерений
+        - CUDA
+        - управление данными
+        - хемометрика
+        - LIMS-системы
+        - ChemDraw
+        - Reaxys
+        - SciFinder
+        - моделирование процессов
+        - RDKit
+        - молекулярная динамика
+        - квантово-химические расчёты
+    - id: professional_texts
+      label_ru: Профессиональные тексты
+      label_en: Professional Texts
+      hypothesis: "This skill involves writing, reading, or working with professional and scientific texts, documentation, publications, and reports."
+      seed_glossaries:
+        - научные публикации
+        - отчёты
+        - документация
+        - статьи
+        - гранты
+        - написание статей
+        - подготовка отчётов
+        - научные доклады
+        - техническая документация
+        - рецензирование
+        - обзор литературы
+        - подготовка протоколов
+        - оформление методик
+        - аннотация геномов
+        - метаанализ
+        - отчётность
+        - взаимодействие с заказчиком
+        - подготовка договоров
+        - регламенты
+        - стандарты GMP
+        - патентный поиск
+        - написание обзоров
+        - визуализация результатов
+        - построение дашбордов
+        - доклады на конференциях
+        - отчёты об испытаниях
+        - технические задания
+        - отчётность по грантам
+        - доклады
+        - оформление протоколов анализа
+        - подготовка методик
+        - стандарты ГОСТ
+        - лабораторные отчёты
+    - id: t_profile
+      label_ru: Кругозор
+      label_en: Outlook
+      hypothesis: "This skill reflects broad erudition and interdisciplinary breadth — knowledge that spans multiple STEM fields beyond a single specialty."
+      skill_category_triggers: []
+      seed_glossaries:
+        - широкий кругозор
+        - смежные дисциплины
+        - общая физика
+        - общая биология
+        - общая химия
+        - междисциплинарные знания
+        - эрудиция
+        - история науки
+        - системное мышление
+        - научный кругозор
+        - математическая эрудиция
+        - инженерный кругозор
+        - кругозор
+    - id: management
+      label_ru: Управление
+      label_en: Management & Organization
+      hypothesis: "This skill involves managing teams, projects, budgets, or organizational processes."
+      skill_category_triggers:
+        - Управление проектами и ресурсами
+      seed_glossaries:
+        - руководство командой
+        - управление проектами
+        - планирование
+        - бюджет
+        - координация сотрудников
+        - постановка задач
+        - контроль сроков
+        - управление ресурсами
+        - организация работы
+        - наставничество
+        - ведение лабораторного журнала
+        - планирование эксперимента
+        - учёт реактивов
+        - работа с поставщиками
+        - ведение проектов
+        - документирование конвейеров
+        - командная работа
+        - рецензирование кода
+        - планирование бюджета
+        - координация команды
+        - управление закупками
+        - планирование производства
+        - ведение задач
+        - ведение регламентов
+        - координация публикаций
+        - ведение библиографии
+        - работа с редакциями
+        - организация семинаров
+        - постановка аналитических задач
+        - работа с заказчиком
+        - управление данными
+        - техника безопасности
+        - учёт оборудования
+        - научное руководство
+        - планирование исследований
+        - координация группы
+        - планирование работ
+        - грантовые заявки
+        - планирование анализов
+        - планирование синтезов
+
+# Soft competences (new — Phase 5b: archetype classification + soft scoring)
+soft_competences:
+  model: facebook/bart-large-mnli
+  device: cuda
+  batch_size: 32
+  confidence_threshold: 0.3
+  min_descriptions: 5
+  hypotheses:
+    - id: thinking
+      label_ru: Мышление
+      hypothesis: "This role requires critical thinking, analytical reasoning, problem-solving, or intellectual creativity."
+    - id: teamwork
+      label_ru: Командное Взаимодействие
+      hypothesis: "This role requires teamwork, collaboration, coordinating with colleagues, or interdisciplinary cooperation."
+    - id: leadership
+      label_ru: Ответственность и Лидерство
+      hypothesis: "This role requires taking responsibility, leading people or projects, decision-making, or mentoring others."
+    - id: professional_culture
+      label_ru: Профессиональная культура
+      hypothesis: "This role requires professional ethics, scientific integrity, adherence to standards and norms, or responsible professional conduct."
+  # Soft competences are derived from the 6 content hard axes via this fixed
+  # rubric. Each row is a linear combination of hard-axis scores whose
+  # coefficients sum to 1.0 (a convex combination, hence already in [1, 5]).
+  soft_rubric:
+    thinking:
+      data_analysis: 0.45
+      computational: 0.35
+      experimental: 0.20
+    teamwork:
+      professional_texts: 0.40
+      management: 0.35
+      experimental: 0.25
+    leadership:
+      management: 0.70
+      professional_texts: 0.20
+      domain_knowledge: 0.10
+    professional_culture:
+      professional_texts: 0.50
+      domain_knowledge: 0.30
+      management: 0.20
+  baseline:
+    Техник: {thinking: 2, teamwork: 2, leadership: 1, professional_culture: 2}
+    Исследователь: {thinking: 4, teamwork: 3, leadership: 2, professional_culture: 3}
+    Методолог: {thinking: 4, teamwork: 3, leadership: 2, professional_culture: 3}
+    Инженер: {thinking: 3, teamwork: 2, leadership: 2, professional_culture: 2}
+    Ведущий специалист: {thinking: 4, teamwork: 4, leadership: 4, professional_culture: 4}
+    Гибрид: {thinking: 4, teamwork: 3, leadership: 3, professional_culture: 3}
+  archetypes: [Техник, Исследователь, Методолог, Инженер, Ведущий специалист, Гибрид]
 
 # Years of experience extraction (regex-based, from vacancy description)
 experience:
+  bins: [0, 1, 3, 5, 10]
   patterns:
     - "опыт работы.*?(\\d+)[-–]*(\\d*)\\s*(год|лет|года)"
     - "стаж работы.*?(\\d+)[-–]*(\\d*)\\s*(год|лет|года)"
     - "опыт.*?от\\s*(\\d+)\\s*(год|лет|года)"
     - "(\\d+)[-–](\\d+)\\s*(год|лет|года).*?опыт"
     - "требуемый опыт.*?(\\d+)[-–]*(\\d*)\\s*(год|лет|года)"
+
+# Skills diagram display (top-N horizontal bars, segmented by axis membership)
+skills_display:
+  top_n: 15
 
 # ---------------------------------------------------------------------------
 # Phase 7: Validation

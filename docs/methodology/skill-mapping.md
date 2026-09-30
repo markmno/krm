@@ -4,7 +4,7 @@
 
 Навык — это атомарная единица компетенции (например, "работа с электронным
 микроскопом"). Ось компетенции — это агрегированная категория (например,
-"Экспериментальный опыт"). Один навык может принадлежать нескольким осям.
+"Эксперимент"). Один навык может принадлежать нескольким осям.
 
 Задача: отобразить каждый навык на одну или несколько осей с весами.
 
@@ -21,21 +21,22 @@
 
 ### Формулировка гипотез
 
-Для каждой из 6 осей формулируется гипотеза на английском (рабочий язык NLI):
+Для каждой из 7 осей формулируется гипотеза на английском (рабочий язык NLI):
 
 | Ось | Гипотеза |
 |-----|---------|
-| Экспериментальный опыт | This skill involves hands-on laboratory or field experimental work with scientific equipment |
-| Предметные знания | This skill involves deep theoretical or conceptual understanding of a specific scientific domain |
-| Управление и коммуникации | This skill involves project management, team leadership, grant writing, or scientific presentation |
-| Научная литература | This skill involves searching, reading, writing, reviewing, or organizing scientific literature and technical documentation |
-| Анализ данных | This skill involves statistical analysis, quantitative data processing, measurement error evaluation, or research methodology |
-| Вычислительные методы | This skill involves computational modeling, numerical simulation, algorithm development, or high-performance computing |
+| Доменная база | This skill requires deep theoretical or applied knowledge in a specific scientific or technical domain |
+| Эксперимент | This skill involves hands-on laboratory or field experimental work with equipment, organisms, or materials |
+| Анализ данных | This skill involves analyzing data, performing statistical tests, or applying quantitative methods |
+| Вычислительные методы | This skill involves computational modeling, programming, algorithm development, or numerical methods |
+| Профессиональные тексты | This skill involves writing, reading, or working with professional and scientific texts, documentation, publications, and reports |
+| T-профиль | This skill reflects broad erudition and interdisciplinary breadth — knowledge that spans multiple STEM fields beyond a single specialty |
+| Управление | This skill involves managing teams, projects, budgets, or organizational processes |
 
 ### Процесс
 
 1. Перевести русский навык на английский (multilingual-e5)
-2. Подать в NLI: `premise = "{english skill} requires expertise in..."`, 6 гипотез
+2. Подать в NLI: `premise = "{english skill} requires expertise in..."`, 7 гипотез
 3. Извлечь entailment probability для каждой гипотезы
 4. Нормализовать: `axis_weight = p_entail / (p_entail + p_neutral + p_contradiction)`
 
@@ -48,8 +49,9 @@ NLI results:
 - domain_knowledge: entailment 0.72 → weight 0.72
 - experimental: entailment 0.12 → weight 0.12
 - management: entailment 0.04 → weight 0.04
-- literature: entailment 0.15 → weight 0.15
+- professional_texts: entailment 0.15 → weight 0.15
 - data_analysis: entailment 0.22 → weight 0.22
+- t_profile: entailment 0.18 → weight 0.18
 
 Итог: навык вносит вклад в computational (0.87) и domain_knowledge (0.72).
 
@@ -75,7 +77,7 @@ normalize: prof[axis_j] in [1, 5]
 ### Внешняя
 
 - Spearman rank correlation экспертных оценок и модельных: rho >= 0.75
-- 3 роли x 6 осей = 18 суждений
+- 3 роли x 7 осей = 21 суждение
 
 ### Edge cases
 

@@ -1,11 +1,9 @@
 """Phase 2.5: Broad Role Characteristics Extraction from Vacancy Descriptions.
 
 Uses zero-shot natural language inference (NLI) to score each vacancy
-against 12 characteristic hypotheses that describe broad role-level
-requirements — laboratory work, field work, team leadership, grant writing,
-publication, teaching, project management, administrative duties, equipment
-maintenance, international collaboration, industry partnership, and
-regulatory compliance.
+against 7 unified characteristic hypotheses that describe broad role-level
+requirements — experimental work, domain knowledge, management, scientific
+communication, data analysis, and computational methods.
 
 Years-of-experience is extracted separately via regex from the vacancy
 description text.
@@ -40,7 +38,7 @@ Output schema
      - HH.ru vacancy identifier.
    * - ``characteristic_id``
      - str
-     - Hypothesis identifier from config (e.g. ``"laboratory_work"``).
+      - Hypothesis identifier from config (e.g. ``"experimental"``).
    * - ``characteristic_label``
      - str
      - Russian label (e.g. *Лабораторная работа*).
@@ -181,8 +179,13 @@ def extract_characteristics(
         ``characteristic_label``, ``confidence``. May be empty if no
         confidence scores exceed the threshold.
     """
-    hypotheses_cfg: list[dict[str, str]] = config.characteristics_hypotheses
-    hypothesis_texts: list[str] = [h["hypothesis"] for h in hypotheses_cfg]
+    hypotheses: dict[str, str] = config.characteristic_hypotheses
+    labels_ru: dict[str, str] = config.characteristic_labels_ru
+    hypothesis_to_id: dict[str, str] = {text: cid for cid, text in hypotheses.items()}
+    hypothesis_to_label: dict[str, str] = {
+        text: labels_ru[cid] for cid, text in hypotheses.items()
+    }
+    hypothesis_texts: list[str] = list(hypotheses.values())
 
     # Sanitise descriptions: convert None/NaN to empty string.
     sanitised: list[str] = [
@@ -233,20 +236,10 @@ def extract_characteristics(
 
             for label, score in zip(result["labels"], result["scores"]):
                 if score >= threshold:
-                    # Find which hypothesis config entry matches this label.
-                    # The label returned is the hypothesis text.
-                    char_id: str = ""
-                    char_label: str = ""
-                    for h in hypotheses_cfg:
-                        if h["hypothesis"] == label:
-                            char_id = h["id"]
-                            char_label = h["label_ru"]
-                            break
-
                     all_rows.append({
                         "vacancy_id": vacancy_id,
-                        "characteristic_id": char_id,
-                        "characteristic_label": char_label,
+                        "characteristic_id": hypothesis_to_id.get(label, ""),
+                        "characteristic_label": hypothesis_to_label.get(label, ""),
                         "confidence": float(score),
                     })
 
@@ -298,26 +291,76 @@ def _extract_title(
     return ""
 
 
-def run_pipeline(config: Config) -> pd.DataFrame:
+# ---------------------------------------------------------------------------
+# Title-level characteristic aggregation
+# ---------------------------------------------------------------------------
+
+
+def _compute_title_characteristics(
+    characteristics_df: pd.DataFrame,
+) -> dict[str, list[str]]:
+    """Aggregate characteristic scores to produce a per-title grounding dict.
+
+    Groups the characteristics DataFrame by ``extracted_title`` and, for
+    each unique title, selects the top‑2 characteristic labels by mean
+    confidence score.  Titles with no characteristic rows above threshold
+    are omitted.
+
+    Args:
+        characteristics_df: Output from :func:`extract_characteristics`
+            with columns ``extracted_title``, ``characteristic_label``,
+            ``confidence``.
+
+    Returns:
+        Mapping ``{title: [label_ru, label_ru]}`` where the two labels
+        are ordered by descending mean confidence.  Titles that have
+        fewer than 2 characteristic rows yield a shorter list.
+    """
+    if characteristics_df.empty or "extracted_title" not in characteristics_df.columns:
+        return {}
+
+    grouped = (
+        characteristics_df.groupby(["extracted_title", "characteristic_label"])["confidence"]
+        .mean()
+        .reset_index()
+    )
+
+    title_characteristics: dict[str, list[str]] = {}
+    for title, grp in grouped.groupby("extracted_title"):
+        top = grp.nlargest(2, "confidence")["characteristic_label"].tolist()
+        if top:
+            title_characteristics[str(title)] = top
+
+    return title_characteristics
+
+
+def run_pipeline(config: Config) -> tuple[pd.DataFrame, dict[str, list[str]]]:
     """Run Phase 2.5: extract characteristics and experience from vacancies.
 
     Pipeline steps:
 
     1. Reads ``classified.parquet`` from ``config.output_dir``.
-    2. Runs zero-shot NLI to score each vacancy against 12 characteristic
+    2. Runs zero-shot NLI to score each vacancy against 7 characteristic
        hypotheses, emitting rows where confidence ≥ threshold.
     3. Extracts years of experience from each vacancy description via regex.
     4. Merges characteristics, experience, and title into a single
        DataFrame.
-    5. Writes ``characteristics.parquet`` to ``config.output_dir``.
+    5. Computes per-title top-2 characteristic labels
+       (``title_characteristics`` dict) for downstream grounding.
+    6. Writes ``characteristics.parquet`` to ``config.output_dir``.
 
     Args:
         config: Pipeline configuration.
 
     Returns:
-        DataFrame with columns: ``vacancy_id``, ``characteristic_id``,
-        ``characteristic_label``, ``confidence``, ``extracted_title``,
-        ``experience_years``.
+        Tuple of ``(characteristics_df, title_characteristics)``:
+
+        * **characteristics_df** — DataFrame with columns: ``vacancy_id``,
+          ``characteristic_id``, ``characteristic_label``, ``confidence``,
+          ``extracted_title``, ``experience_years``, ``year``.
+        * **title_characteristics** — ``dict[str, list[str]]`` mapping
+          each ``extracted_title`` to its top‑2 Russian characteristic
+          labels (ordered by mean confidence).
 
     Raises:
         FileNotFoundError: If ``classified.parquet`` does not exist.
@@ -344,7 +387,7 @@ def run_pipeline(config: Config) -> pd.DataFrame:
             ]
         )
         write_parquet(result, config.characteristics_path)
-        return result
+        return result, {}
 
     # ------------------------------------------------------------------
     # 2. Extract characteristics via zero-shot NLI
@@ -403,7 +446,7 @@ def run_pipeline(config: Config) -> pd.DataFrame:
     # ------------------------------------------------------------------
     year_map: dict[str, int] = {}
     try:
-        conn = get_connection()
+        conn = get_connection(config.db_path)
         year_rows = conn.execute(
             "SELECT id, EXTRACT(YEAR FROM fetched_at) AS year FROM raw_vacancies"
         ).fetchall()
@@ -420,10 +463,18 @@ def run_pipeline(config: Config) -> pd.DataFrame:
     # ------------------------------------------------------------------
     if characteristics_df.empty:
         # No characteristics above threshold — still output vacancy-level
-        # experience and title data.
+        # experience and title data with placeholder characteristic columns.
+        print(
+            "[Phase 2.5] No characteristic assignments passed the "
+            f"confidence threshold ({config.characteristics_confidence_threshold}). "
+            "Writing parameter-only output."
+        )
         final_df = pd.DataFrame({
             "vacancy_id": pd.Series(vacancy_ids, dtype=str),
         })
+        final_df["characteristic_id"] = None
+        final_df["characteristic_label"] = None
+        final_df["confidence"] = pd.NA
         final_df["extracted_title"] = final_df["vacancy_id"].map(title_series)
         final_df["experience_years"] = final_df["vacancy_id"].map(experience_series)
         final_df["year"] = final_df["vacancy_id"].map(year_map)
@@ -446,7 +497,17 @@ def run_pipeline(config: Config) -> pd.DataFrame:
     ]]
 
     # ------------------------------------------------------------------
-    # 6. Write output
+    # 6. Compute per-title characteristic grounding dict
+    # ------------------------------------------------------------------
+    title_characteristics = _compute_title_characteristics(final_df)
+    n_titles = len(title_characteristics)
+    print(
+        f"[Phase 2.5] Computed title characteristics for "
+        f"{n_titles} unique titles"
+    )
+
+    # ------------------------------------------------------------------
+    # 7. Write output
     # ------------------------------------------------------------------
     write_parquet(final_df, config.characteristics_path)
     print(
@@ -454,7 +515,18 @@ def run_pipeline(config: Config) -> pd.DataFrame:
         f"to {config.characteristics_path}"
     )
 
-    return final_df
+    # Per-vacancy experience for ALL classified vacancies. The characteristics
+    # table above is a sparse long-format (vacancy × characteristic) view, so it
+    # only carries experience on rows that also have an assignment above the
+    # confidence threshold. Phase 6's Experience histogram needs one row per
+    # vacancy, so persist the full vacancy→experience mapping separately.
+    vacancy_experience = pd.DataFrame({"vacancy_id": vacancy_ids})
+    vacancy_experience["experience_years"] = vacancy_experience["vacancy_id"].map(
+        experience_series
+    )
+    write_parquet(vacancy_experience, config.vacancy_experience_path)
+
+    return final_df, title_characteristics
 
 
 # ---------------------------------------------------------------------------
@@ -463,5 +535,8 @@ def run_pipeline(config: Config) -> pd.DataFrame:
 
 if __name__ == "__main__":
     config = Config()
-    df = run_pipeline(config)
+    df, title_chars = run_pipeline(config)
     print(df.head())
+    print(f"\nTitle characteristics ({len(title_chars)} titles):")
+    for title, labels in list(title_chars.items())[:5]:
+        print(f"  {title}: {labels}")

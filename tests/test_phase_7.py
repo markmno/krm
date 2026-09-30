@@ -15,7 +15,7 @@ from krm.phase_7_validate import (
     _validate_phase_2_classification,
     _validate_phase_3_roles,
     _validate_phase_4_skills,
-    _validate_phase_5_axes,
+    _validate_phase_5_characteristics,
     _validate_phase_6_models,
     _validate_integration,
 )
@@ -44,8 +44,12 @@ class _FakeConfig:
         return self._paths["skills_per_role_path"]  # type: ignore[index]
 
     @property
-    def axis_scores_path(self) -> Path:
-        return self._paths["axis_scores_path"]  # type: ignore[index]
+    def characteristic_scores_path(self) -> Path:
+        return self._paths["characteristic_scores_path"]  # type: ignore[index]
+
+    @property
+    def soft_scores_path(self) -> Path:
+        return self._paths["soft_scores_path"]  # type: ignore[index]
 
     @property
     def models_dir(self) -> Path:
@@ -269,7 +273,12 @@ class TestValidatePhase6Models:
         models_dir.mkdir()
         for i in range(3):
             self._write_json(models_dir, f"role_{i}.json", {
-                "role_id": i, "role_label": f"role_{i}", "axes": [],
+                "role_id": i,
+                "role_label": f"role_{i}",
+                "characteristics": [],
+                "soft_competences": [],
+                "experience": {},
+                "skills": [],
             })
 
         cfg = _FakeConfig(models_dir=models_dir)
@@ -284,7 +293,12 @@ class TestValidatePhase6Models:
         models_dir = tmp_path / "models"
         models_dir.mkdir()
         self._write_json(models_dir, "valid.json", {
-            "role_id": 0, "role_label": "ok", "axes": [],
+            "role_id": 0,
+            "role_label": "ok",
+            "characteristics": [],
+            "soft_competences": [],
+            "experience": {},
+            "skills": [],
         })
         self._write_json(models_dir, "missing_keys.json", {
             "role_id": 1,
@@ -306,9 +320,9 @@ class TestValidatePhase6Models:
         models_dir = tmp_path / "models"
         models_dir.mkdir()
         self._write_json(models_dir, "no_role_id.json", {
-            "role_label": "test", "axes": [],
+            "role_label": "test", "characteristics": [],
         })
-        self._write_json(models_dir, "no_axes.json", {
+        self._write_json(models_dir, "no_characteristics.json", {
             "role_id": 1, "role_label": "test",
         })
 
@@ -318,7 +332,7 @@ class TestValidatePhase6Models:
         assert result["valid"] == 0
         assert result["invalid"] == 2
         assert "no_role_id.json" in str(result["errors"])
-        assert "no_axes.json" in str(result["errors"])
+        assert "no_characteristics.json" in str(result["errors"])
 
     def test_no_models_dir(self, tmp_path: Path):
         missing_dir = tmp_path / "nonexistent"
@@ -344,7 +358,10 @@ class TestValidatePhase6Models:
         self._write_json(models_dir, "role_0.json", {
             "role_id": 0,
             "role_label": "физик-экспериментатор",
-            "axes": [{"axis_id": "exp", "proficiency": 4.5}],
+            "characteristics": [{"characteristic_id": "exp", "proficiency": 4.5}],
+            "soft_competences": [],
+            "experience": {},
+            "skills": [],
         })
 
         cfg = _FakeConfig(models_dir=models_dir)
@@ -382,11 +399,31 @@ class TestValidatePhase6Models:
         models_dir = tmp_path / "models"
         models_dir.mkdir()
         self._write_json(models_dir, "r.json", {
-            "role_id": 0, "role_label": "x", "axes": [],
+            "role_id": 0,
+            "role_label": "x",
+            "characteristics": [],
+            "soft_competences": [],
+            "experience": {},
+            "skills": [],
         })
         cfg = _FakeConfig(models_dir=models_dir)
         result = _validate_phase_6_models(cfg)  # type: ignore[arg-type]
         assert "integrity_target" in result
+
+    def test_missing_new_model_keys(self, tmp_path: Path):
+        """A model missing soft_competences/experience/skills must be flagged invalid."""
+        models_dir = tmp_path / "models"
+        models_dir.mkdir()
+        self._write_json(models_dir, "role_0.json", {
+            "role_id": 0, "role_label": "r", "characteristics": [],
+        })
+
+        cfg = _FakeConfig(models_dir=models_dir)
+        result = _validate_phase_6_models(cfg)  # type: ignore[arg-type]
+
+        assert result["valid"] == 0
+        assert result["invalid"] == 1
+        assert "soft_competences" in str(result["errors"])
 
 
 # ===========================================================================
@@ -489,51 +526,51 @@ class TestValidatePhase4Skills:
 
 
 # ===========================================================================
-# _validate_phase_5_axes
+# _validate_phase_5_characteristics
 # ===========================================================================
 
-class TestValidatePhase5Axes:
-    """Tests for _validate_phase_5_axes using temp parquet files."""
+class TestValidatePhase5Characteristics:
+    """Tests for _validate_phase_5_characteristics using temp parquet files."""
 
-    def test_valid_axis_scores(self, tmp_path: Path):
+    def test_valid_characteristic_scores(self, tmp_path: Path):
         df = pd.DataFrame({
             "role_id": [0, 0, 1, 1],
-            "axis_id": ["exp", "domain", "exp", "domain"],
+            "characteristic_id": ["exp", "domain", "exp", "domain"],
             "proficiency": [1.0, 2.5, 3.0, 4.5],
         })
-        df.to_parquet(tmp_path / "axis_scores.parquet")
+        df.to_parquet(tmp_path / "characteristic_scores.parquet")
 
-        cfg = _FakeConfig(axis_scores_path=tmp_path / "axis_scores.parquet")
-        result = _validate_phase_5_axes(cfg)  # type: ignore[arg-type]
+        cfg = _FakeConfig(characteristic_scores_path=tmp_path / "characteristic_scores.parquet")
+        result = _validate_phase_5_characteristics(cfg)  # type: ignore[arg-type]
 
-        assert result["total_axis_scores"] == 4
+        assert result["total_characteristic_scores"] == 4
         assert result["roles_covered"] == 2
-        assert result["axes_covered"] == 2
+        assert result["characteristics_covered"] == 2
         assert result["proficiency_range"] == [1.0, 4.5]
         assert result["proficiency_mean"] == pytest.approx(2.75)
         assert "spearman_target" in result
 
     def test_no_proficiency_column(self, tmp_path: Path):
-        df = pd.DataFrame({"role_id": [0], "axis_id": ["exp"]})
-        df.to_parquet(tmp_path / "axis_scores.parquet")
+        df = pd.DataFrame({"role_id": [0], "characteristic_id": ["exp"]})
+        df.to_parquet(tmp_path / "characteristic_scores.parquet")
 
-        cfg = _FakeConfig(axis_scores_path=tmp_path / "axis_scores.parquet")
-        result = _validate_phase_5_axes(cfg)  # type: ignore[arg-type]
+        cfg = _FakeConfig(characteristic_scores_path=tmp_path / "characteristic_scores.parquet")
+        result = _validate_phase_5_characteristics(cfg)  # type: ignore[arg-type]
         assert "error" in result
 
     def test_empty_proficiency(self, tmp_path: Path):
         df = pd.DataFrame({
-            "role_id": [0], "axis_id": ["exp"], "proficiency": [None],
+            "role_id": [0], "characteristic_id": ["exp"], "proficiency": [None],
         })
-        df.to_parquet(tmp_path / "axis_scores.parquet")
+        df.to_parquet(tmp_path / "characteristic_scores.parquet")
 
-        cfg = _FakeConfig(axis_scores_path=tmp_path / "axis_scores.parquet")
-        result = _validate_phase_5_axes(cfg)  # type: ignore[arg-type]
+        cfg = _FakeConfig(characteristic_scores_path=tmp_path / "characteristic_scores.parquet")
+        result = _validate_phase_5_characteristics(cfg)  # type: ignore[arg-type]
         assert "error" in result
 
     def test_file_not_found(self, tmp_path: Path):
-        cfg = _FakeConfig(axis_scores_path=tmp_path / "nada.parquet")
-        result = _validate_phase_5_axes(cfg)  # type: ignore[arg-type]
+        cfg = _FakeConfig(characteristic_scores_path=tmp_path / "nada.parquet")
+        result = _validate_phase_5_characteristics(cfg)  # type: ignore[arg-type]
         assert result["status"] == "skipped"
 
 
@@ -564,20 +601,31 @@ class TestValidateIntegration:
         })
         skills.to_parquet(tmp_path / "skills_per_role.parquet")
 
-        axes = pd.DataFrame({
-            "role_id": [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1],
-            "axis_id": [
-                "a", "b", "c", "d", "e", "f",
-                "a", "b", "c", "d", "e", "f",
+        characteristics = pd.DataFrame({
+            "role_id": [0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1],
+            "characteristic_id": [
+                "a", "b", "c", "d", "e", "f", "g",
+                "a", "b", "c", "d", "e", "f", "g",
             ],
         })
-        axes.to_parquet(tmp_path / "axis_scores.parquet")
+        characteristics.to_parquet(tmp_path / "characteristic_scores.parquet")
+
+        soft = pd.DataFrame({
+            "role_id": [0, 0, 0, 0, 1, 1, 1, 1],
+            "soft_id": [
+                "thinking", "teamwork", "leadership", "professional_culture",
+                "thinking", "teamwork", "leadership", "professional_culture",
+            ],
+            "proficiency": [3.0, 3.0, 3.0, 3.0, 2.0, 2.0, 2.0, 2.0],
+        })
+        soft.to_parquet(tmp_path / "soft_scores.parquet")
 
         cfg = _FakeConfig(
             classified_path=tmp_path / "classified.parquet",
             roles_path=tmp_path / "roles.parquet",
             skills_per_role_path=tmp_path / "skills_per_role.parquet",
-            axis_scores_path=tmp_path / "axis_scores.parquet",
+            characteristic_scores_path=tmp_path / "characteristic_scores.parquet",
+            soft_scores_path=tmp_path / "soft_scores.parquet",
         )
         result = _validate_integration(cfg)  # type: ignore[arg-type]
 
@@ -586,18 +634,92 @@ class TestValidateIntegration:
         assert result["total_roles"] == 4
         assert result["active_roles"] == 3
         assert result["roles_with_skills"] == 4
-        assert result["roles_with_axis_scores"] == 2
-        assert result["roles_with_complete_axes"] == 2  # both roles have all 6 axes
+        assert result["roles_with_characteristic_scores"] == 2
+        assert result["roles_with_complete_characteristics"] == 2  # both roles have all 7
+        assert result["roles_with_soft_scores"] == 2
+        assert result["roles_with_complete_soft_scores"] == 2  # both roles have all 4
+
+    def test_complete_characteristics_counts_seven_axes(self, tmp_path: Path):
+        """A role with 7 distinct axes counts as complete against 7 (not 6)."""
+        characteristics = pd.DataFrame({
+            "role_id": [0] * 7 + [1] * 7,
+            "characteristic_id": list("abcdefg") + list("abcdefg"),
+        })
+        characteristics.to_parquet(tmp_path / "characteristic_scores.parquet")
+
+        cfg = _FakeConfig(
+            classified_path=tmp_path / "c.parquet",
+            roles_path=tmp_path / "r.parquet",
+            skills_per_role_path=tmp_path / "s.parquet",
+            characteristic_scores_path=tmp_path / "characteristic_scores.parquet",
+            soft_scores_path=tmp_path / "soft.parquet",
+        )
+        result = _validate_integration(cfg)  # type: ignore[arg-type]
+
+        assert result["roles_with_complete_characteristics"] == 2
+
+    def test_six_axes_not_complete(self, tmp_path: Path):
+        """A role with only 6 distinct axes is NOT complete against 7."""
+        characteristics = pd.DataFrame({
+            "role_id": [0] * 6,
+            "characteristic_id": list("abcdef"),
+        })
+        characteristics.to_parquet(tmp_path / "characteristic_scores.parquet")
+
+        cfg = _FakeConfig(
+            classified_path=tmp_path / "c.parquet",
+            roles_path=tmp_path / "r.parquet",
+            skills_per_role_path=tmp_path / "s.parquet",
+            characteristic_scores_path=tmp_path / "characteristic_scores.parquet",
+            soft_scores_path=tmp_path / "soft.parquet",
+        )
+        result = _validate_integration(cfg)  # type: ignore[arg-type]
+
+        assert result["roles_with_complete_characteristics"] == 0
+
+    def test_soft_coverage_complete_and_partial(self, tmp_path: Path):
+        """Soft coverage: counts roles with any soft scores and roles with all 4."""
+        classified = pd.DataFrame({
+            "vacancy_id": ["v1"],
+            "stem_category": ["STEM_RESEARCH"],
+        })
+        classified.to_parquet(tmp_path / "classified.parquet")
+
+        soft = pd.DataFrame({
+            "role_id": [0, 0, 0, 0, 1, 1],
+            "soft_id": [
+                "thinking", "teamwork", "leadership", "professional_culture",
+                "thinking", "teamwork",
+            ],
+            "proficiency": [3.0, 3.0, 3.0, 3.0, 2.0, 2.0],
+        })
+        soft.to_parquet(tmp_path / "soft_scores.parquet")
+
+        cfg = _FakeConfig(
+            classified_path=tmp_path / "classified.parquet",
+            roles_path=tmp_path / "r.parquet",
+            skills_per_role_path=tmp_path / "s.parquet",
+            characteristic_scores_path=tmp_path / "a.parquet",
+            soft_scores_path=tmp_path / "soft_scores.parquet",
+        )
+        result = _validate_integration(cfg)  # type: ignore[arg-type]
+
+        assert result["roles_with_soft_scores"] == 2
+        assert result["roles_with_complete_soft_scores"] == 1  # only role 0 has all 4
 
     def test_no_files(self, tmp_path: Path):
         cfg = _FakeConfig(
             classified_path=tmp_path / "c.parquet",
             roles_path=tmp_path / "r.parquet",
             skills_per_role_path=tmp_path / "s.parquet",
-            axis_scores_path=tmp_path / "a.parquet",
+            characteristic_scores_path=tmp_path / "a.parquet",
+            soft_scores_path=tmp_path / "soft.parquet",
         )
         result = _validate_integration(cfg)  # type: ignore[arg-type]
-        assert result == {}
+        assert result == {
+            "roles_with_soft_scores": 0,
+            "roles_with_complete_soft_scores": 0,
+        }
 
     def test_partial_data(self, tmp_path: Path):
         classified = pd.DataFrame({
@@ -610,9 +732,11 @@ class TestValidateIntegration:
             classified_path=tmp_path / "classified.parquet",
             roles_path=tmp_path / "r.parquet",
             skills_per_role_path=tmp_path / "s.parquet",
-            axis_scores_path=tmp_path / "a.parquet",
+            characteristic_scores_path=tmp_path / "a.parquet",
+            soft_scores_path=tmp_path / "soft.parquet",
         )
         result = _validate_integration(cfg)  # type: ignore[arg-type]
         assert result["total_vacancies"] == 1
         assert result["stem_research_vacancies"] == 1
         assert "total_roles" not in result
+        assert result["roles_with_soft_scores"] == 0

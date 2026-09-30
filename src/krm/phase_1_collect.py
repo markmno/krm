@@ -1,8 +1,10 @@
-"""Phase 1: HH.ru API vacancy scraper with DuckDB storage.
+"""Phase 1: HH.ru API vacancy scraper with DuckDB storage (async).
 
 Collects raw STEM vacancy data from the HeadHunter API for all configured
 keywords, respecting rate limits with exponential backoff, and stores results
-in DuckDB via the shared I/O layer.
+in DuckDB via the shared I/O layer. Uses ``httpx.AsyncClient`` so requests
+share a connection pool and support an optional HTTP proxy (for when hh.ru
+IP-blocks the host).
 
 Usage:
     from krm.config import Config
@@ -15,20 +17,24 @@ Usage:
 
 from __future__ import annotations
 
-import time
+import asyncio
+import json
 from datetime import datetime, timezone
 from typing import Any
 
 import httpx
+from loguru import logger
 
 from krm.config import Config
 from krm.lib.io import get_connection, init_tables, upsert_raw_vacancy
 
 HH_API_BASE = "https://api.hh.ru"
-HH_USER_AGENT = "KRM-Pipeline/0.2.0 (STEM-labor-market-analysis; https://github.com/example/krm)"
+HH_USER_AGENT = "KRM-Pipeline/0.2.0 (STEM-labor-market-analysis)"
 HH_PER_PAGE = 100  # Maximum page size supported by HH.ru API
 HH_MAX_RESULTS = 2000  # HH.ru API hard cap on search results
 MAX_PAGES = HH_MAX_RESULTS // HH_PER_PAGE  # 20 pages
+
+_MAX_RETRIES = 8
 
 
 def collect(config: Config) -> int:
@@ -36,43 +42,47 @@ def collect(config: Config) -> int:
 
     Args:
         config: Typed configuration with keywords, date range, role filters,
-                and rate limiting parameters.
+                rate limiting, and optional ``http_proxy``.
 
     Returns:
         Total number of vacancies collected across all keywords.
     """
     conn = get_connection()
     init_tables(conn)
+    try:
+        total = asyncio.run(_collect_async(config, conn))
+    finally:
+        conn.close()
+    return total
 
-    date_from_iso = f"{config.date_from}T00:00:00"
-    total_collected = 0
 
-    # Use professional_roles as the primary API filter.
-    # categories and exclude_roles are stored as metadata for downstream phases.
+async def _collect_async(config: Config, conn: Any) -> int:
+    """Run keyword collection against a single shared async client."""
     api_params: dict[str, Any] = {
-        "date_from": date_from_iso,
+        "date_from": f"{config.date_from}T00:00:00",
         "per_page": HH_PER_PAGE,
         "order_by": "publication_time",
     }
+    min_interval = 1.0 / config.rate_limit_rps
+    proxy = config.http_proxy or None
 
-    for keyword in config.keywords:
-        run_id = _make_run_id(keyword)
-        _insert_scrape_run(conn, run_id, keyword, config)
-
-        collected = _collect_keyword(
-            conn=conn,
-            run_id=run_id,
-            keyword=keyword,
-            api_params=api_params,
-            config=config,
-        )
-
-        _finalize_scrape_run(conn, run_id, collected)
-        total_collected += collected
-        print(f"  [{keyword}] Collected {collected} vacancies")
-
-    conn.close()
-    return total_collected
+    async with httpx.AsyncClient(
+        base_url=HH_API_BASE,
+        headers={"User-Agent": HH_USER_AGENT},
+        timeout=30.0,
+        proxy=proxy,
+    ) as client:
+        total = 0
+        for keyword in config.keywords:
+            run_id = _make_run_id(keyword)
+            _insert_scrape_run(conn, run_id, keyword, config)
+            collected = await _collect_keyword(
+                client, conn, run_id, keyword, api_params, config, min_interval
+            )
+            _finalize_scrape_run(conn, run_id, collected)
+            total += collected
+            logger.info(f"  [{keyword}] Collected {collected} vacancies")
+    return total
 
 
 # ---------------------------------------------------------------------------
@@ -96,8 +106,6 @@ def _insert_scrape_run(conn: Any, run_id: str, keyword: str, config: Config) -> 
         "exclude_roles": config.exclude_roles,
         "rate_limit_rps": config.rate_limit_rps,
     }
-    import json
-
     conn.execute(
         "INSERT INTO scrape_runs (run_id, keyword, query_params) VALUES (?, ?, ?)",
         [run_id, keyword, json.dumps(query_params, ensure_ascii=False)],
@@ -112,126 +120,100 @@ def _finalize_scrape_run(conn: Any, run_id: str, count: int) -> None:
     )
 
 
-def _collect_keyword(
+async def _collect_keyword(
+    client: httpx.AsyncClient,
     conn: Any,
     run_id: str,
     keyword: str,
     api_params: dict[str, Any],
     config: Config,
+    min_interval: float,
 ) -> int:
-    """Paginate through HH.ru API for one keyword and upsert all vacancies.
-
-    Returns the number of vacancies stored for this keyword.
-    """
+    """Paginate through HH.ru API for one keyword and upsert all vacancies."""
     params = dict(api_params)
     params["text"] = keyword
 
-    # Attach professional role filters from config.
+    # Professional roles are the primary API filter; categories and
+    # exclude_roles are stored as metadata for downstream phases.
     if config.professional_roles:
         params["professional_role"] = config.professional_roles
 
-    # Categories and exclude_roles are stored in scrape_run metadata
-    # for downstream phases. Professional roles are the primary API filter.
-
     collected = 0
-    backoff = 1.0  # Initial backoff in seconds
+    for page in range(MAX_PAGES):
+        params["page"] = page
+        data = await _get_vacancies(client, params, min_interval)
+        if data is None:
+            break
 
-    with httpx.Client(
-        base_url=HH_API_BASE,
-        headers={"User-Agent": HH_USER_AGENT},
-        timeout=30.0,
-    ) as client:
-        for page in range(MAX_PAGES):
-            params["page"] = page
+        items = data.get("items", [])
+        if not items:
+            break
 
-            response = _request_with_backoff(client, params, backoff, config)
-            if response is None:
-                break
+        for item in items:
+            upsert_raw_vacancy(conn, run_id, str(item["id"]), item)
+            collected += 1
 
-            data = response.json()
-            items = data.get("items", [])
+        logger.info(
+            f"  [{keyword}] Page {page + 1}: fetched {len(items)} "
+            f"(total found: {data.get('found', '?')})"
+        )
 
-            if not items:
-                break
-
-            for item in items:
-                vacancy_id = str(item["id"])
-                upsert_raw_vacancy(conn, run_id, vacancy_id, item)
-                collected += 1
-
-            print(
-                f"  [{keyword}] Page {page + 1}: fetched {len(items)} "
-                f"(total found: {data.get('found', '?')})"
-            )
-
-            # Stop if we've reached the last page.
-            if page + 1 >= data.get("pages", 0):
-                break
+        if page + 1 >= data.get("pages", 0):
+            break
 
     return collected
 
 
-def _request_with_backoff(
-    client: httpx.Client,
+async def _get_vacancies(
+    client: httpx.AsyncClient,
     params: dict[str, Any],
-    backoff: float,
-    config: Config,
-) -> httpx.Response | None:
-    """Issue a GET /vacancies request with rate limiting and exponential backoff.
-
-    Args:
-        client: httpx client with base_url already set.
-        params: Query parameters for the /vacancies endpoint.
-        backoff: Current backoff duration in seconds (mutated on retry).
-        config: Pipeline configuration for rate_limit_rps.
+    min_interval: float,
+) -> dict[str, Any] | None:
+    """GET /vacancies with rate limiting and exponential backoff.
 
     Returns:
-        Response object on success, or None if we should stop paging.
+        Parsed JSON dict on success, or ``None`` if we should stop paging.
     """
-    min_interval = 1.0 / config.rate_limit_rps
-    max_retries = 8
+    backoff = 1.0  # seconds
 
-    for attempt in range(max_retries):
-        time.sleep(min_interval)
+    for _attempt in range(_MAX_RETRIES):
+        await asyncio.sleep(min_interval)
 
         try:
-            response = client.get("/vacancies", params=params)
+            response = await client.get("/vacancies", params=params)
         except httpx.RequestError as exc:
-            print(f"  Request error: {exc}. Retrying in {backoff:.1f}s...")
-            time.sleep(backoff)
+            logger.error(f"  Request error: {exc}. Retrying in {backoff:.1f}s...")
+            await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 120.0)
             continue
 
         if response.status_code == 200:
-            return response
+            return response.json()
 
         if response.status_code == 429:
-            print(f"  Rate limited (429). Backing off {backoff:.1f}s...")
-            time.sleep(backoff)
+            logger.error(f"  Rate limited (429). Backing off {backoff:.1f}s...")
+            await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 120.0)
             continue
 
         if response.status_code == 400:
             # HH.ru returns 400 when page exceeds available results.
-            print(f"  Page out of range (400). Stopping pagination.")
+            logger.info("Page out of range (400). Stopping pagination.")
             return None
 
         if response.status_code == 404:
-            print(f"  Endpoint not found (404): {response.text[:200]}")
+            logger.error(f"  Endpoint not found (404): {response.text[:200]}")
             return None
 
         if 500 <= response.status_code < 600:
-            print(
-                f"  Server error {response.status_code}. "
-                f"Retrying in {backoff:.1f}s..."
-            )
-            time.sleep(backoff)
+            logger.error(f"  Server error {response.status_code}. Retrying in {backoff:.1f}s...")
+            await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 120.0)
             continue
 
         # Unexpected status code.
-        print(f"  Unexpected status {response.status_code}: {response.text[:200]}")
+        logger.warning(f"  Unexpected status {response.status_code}: {response.text[:200]}")
         response.raise_for_status()
 
-    print(f"  Max retries ({max_retries}) exceeded. Stopping pagination.")
+    logger.info(f"  Max retries ({_MAX_RETRIES}) exceeded. Stopping pagination.")
     return None

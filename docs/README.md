@@ -13,7 +13,7 @@
 
 | Аспект | hh-competency v0.1 | КРМ (новая версия) |
 |--------|-------------------|---------------------|
-| Оси компетенций | Data-driven: AgglomerativeClustering + bootstrap validation (k=2..8) | **Фиксированы**: 6 характеристик исследователя |
+| Оси компетенций | Data-driven: AgglomerativeClustering + bootstrap validation (k=2..8) | **Фиксированы**: 7 характеристик исследователя |
 | Классификация навыков по осям | 234 regex-правила (9 категорий) | Zero-shot NLI: multilingual-e5-large + entailment |
 | Обнаружение ролей | Кластеризация навыков по co-occurrence | **Кластеризация названий должностей**: embeddings + UMAP + HDBSCAN |
 | Уровневая шкала | 5 уровней РАН (мнс→гнс) | **Бакалавр → ГНС** (7 уровней: бакалавр, магистр, аспирант, мнс, нс, снс, внс, гнс) |
@@ -23,16 +23,17 @@
 | Хранение | DuckDB (JSON blob) | DuckDB + Parquet (эмбеддинги) |
 | Оркестрация | 8-фазный workflow (Typer) | 7-фазный пайплайн |
 
-## 6 фиксированных осей компетенций
+## 7 фиксированных осей компетенций
 
-| # | Ось | EN | Гипотеза NLI |
-|---|-----|----|-------------|
-| 1 | Экспериментальный опыт | Experimental experience | "This skill involves hands-on laboratory or field experimental work" |
-| 2 | Предметные знания | Domain knowledge | "This skill involves theoretical or conceptual understanding of a scientific domain" |
-| 3 | Управление и коммуникации | Management & communications | "This skill involves project management, team coordination, or scientific communication" |
-| 4 | Научная литература и документация | Scientific literature & documentation | "This skill involves reading, writing, or organizing scientific documents" |
-| 5 | Анализ данных и статистика | Scientific data analysis & statistics | "This skill involves statistical analysis, data processing, or quantitative research" |
-| 6 | Вычислительные методы | Computational methods | "This skill involves computational modeling, simulation, or algorithm development" |
+| # | id | Ось | EN | Гипотеза NLI |
+|---|----|-----|----|-------------|
+| 1 | `domain_knowledge` | Доменная база | Domain Knowledge | "This skill requires deep theoretical or applied knowledge in a specific scientific or technical domain." |
+| 2 | `experimental` | Эксперимент | Experimental Work | "This skill involves hands-on laboratory or field experimental work with equipment, organisms, or materials." |
+| 3 | `data_analysis` | Анализ данных | Data Analysis | "This skill involves analyzing data, performing statistical tests, or applying quantitative methods." |
+| 4 | `computational` | Вычислительные методы | Computational Methods | "This skill involves computational modeling, programming, algorithm development, or numerical methods." |
+| 5 | `professional_texts` | Профессиональные тексты | Professional Texts | "This skill involves writing, reading, or working with professional and scientific texts, documentation, publications, and reports." |
+| 6 | `t_profile` | T-профиль | T-Profile | "This skill reflects broad erudition and interdisciplinary breadth — knowledge that spans multiple STEM fields beyond a single specialty." |
+| 7 | `management` | Управление | Management & Organization | "This skill involves managing teams, projects, budgets, or organizational processes." |
 
 ## Структура документации
 
@@ -58,7 +59,7 @@ krm collect                              # Сбор вакансий с HH.ru
 krm classify                              # Классификация STEM/IT
 krm roles                                 # Кластеризация ролей
 krm skills                                # Извлечение навыков (ESCO)
-krm axes                                  # Маппинг навыков на 6 осей
+krm axes                                  # Маппинг навыков на 7 осей
 krm model                                 # Построение моделей + spider charts
 krm validate                              # Валидация + отчёты
 ```

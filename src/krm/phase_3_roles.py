@@ -25,7 +25,7 @@ import pandas as pd
 import umap
 
 from krm.config import Config
-from krm.lib.embeddings import Embedder
+from krm.lib.embeddings import Embedder, build_title_characteristics
 from krm.lib.io import read_parquet, write_parquet
 from krm.lib.metrics import compute_clustering_metrics
 
@@ -106,16 +106,17 @@ def discover_roles(config: Config) -> pd.DataFrame:
     Returns:
         DataFrame with one row per discovered role (including a noise row):
 
-        ====================== ============================================
-        column                 description
-        ====================== ============================================
-        ``role_id``            int — HDBSCAN cluster label (-1 for noise)
-        ``role_label``         str — most central job title
-        ``centroid_embedding`` bytes — pickled ``np.float32`` centroid array
-        ``top_titles``         str — JSON array of top-3 central titles
-        ``member_count``       int — number of unique titles in the role
-        ``noise_flag``         bool — ``True`` only for the noise row
-        ====================== ============================================
+        =========================== ============================================
+        column                      description
+        =========================== ============================================
+        ``role_id``                 int — HDBSCAN cluster label (-1 for noise)
+        ``role_label``              str — most central job title
+        ``centroid_embedding``      bytes — pickled ``np.float32`` centroid array
+        ``top_titles``              str — JSON array of top-3 central titles
+        ``member_count``            int — number of unique titles in the role
+        ``noise_flag``              bool — ``True`` only for the noise row
+        ``characteristic_profile``  str — JSON dict ``{characteristic_id: mean_confidence}``
+        =========================== ============================================
 
     Raises:
         ValueError: If no ``STEM_RESEARCH`` vacancies exist in the input.
@@ -139,10 +140,40 @@ def discover_roles(config: Config) -> pd.DataFrame:
     print(f"[Phase 3] Clustering {n_titles} unique STEM job titles")
 
     # ------------------------------------------------------------------
-    # 3. Generate embeddings
+    # 2a. Text-enrichment grounding via characteristic labels
+    # ------------------------------------------------------------------
+    characteristics_path = config.characteristics_path
+    characteristics_df: pd.DataFrame | None = None
+    enriched_titles: list[str] | None = None
+
+    if characteristics_path.exists():
+        characteristics_df = read_parquet(characteristics_path)
+        # build_title_characteristics expects 'title' column;
+        # characteristics.parquet uses 'extracted_title'.
+        dims_for_mapping = characteristics_df.rename(
+            columns={"extracted_title": "title"}
+        )
+        title_map = build_title_characteristics(dims_for_mapping, top_n=2)
+        enriched_titles = Embedder.enrich_titles(unique_titles, title_map)
+        n_grounded = sum(
+            1 for t in unique_titles
+            if t in title_map
+        )
+        print(
+            f"[Phase 3] Text-enrichment grounded: "
+            f"{n_grounded}/{n_titles} titles with characteristic context"
+        )
+    else:
+        print(
+            "[Phase 3] Text-enrichment skipped: "
+            f"{characteristics_path} not found (bare titles used)"
+        )
+
+    # ------------------------------------------------------------------
+    # 3. Generate embeddings (with optional enrichment)
     # ------------------------------------------------------------------
     embedder = Embedder(model_name=config.embedding_model)
-    embeddings = embedder.encode(unique_titles)
+    embeddings = embedder.encode(unique_titles, enriched_titles=enriched_titles)
     print(f"[Phase 3] Generated embeddings: {embeddings.shape}")
 
     # ------------------------------------------------------------------
@@ -177,7 +208,11 @@ def discover_roles(config: Config) -> pd.DataFrame:
     labels = clusterer.fit_predict(umap_embeddings)
 
     # 5a. Soft membership for interdisciplinary support
-    soft_membership: np.ndarray = clusterer.all_points_membership_vectors_
+    #     (attribute renamed in newer hdbscan versions — fall back gracefully)
+    try:
+        soft_membership: np.ndarray | None = clusterer.all_points_membership_vectors_
+    except AttributeError:
+        soft_membership = None
 
     unique_labels = set(labels)
     n_clusters_real = len(unique_labels - {-1})
@@ -185,7 +220,7 @@ def discover_roles(config: Config) -> pd.DataFrame:
     print(
         f"[Phase 3] Found {n_clusters_real} clusters, "
         f"{n_noise} noise points "
-        f"(soft membership shape: {soft_membership.shape})"
+        f"(soft membership: {soft_membership.shape if soft_membership is not None else 'N/A'})"
     )
 
     # ------------------------------------------------------------------
@@ -202,6 +237,7 @@ def discover_roles(config: Config) -> pd.DataFrame:
     for cluster_id in sorted(unique_labels):
         mask = labels == cluster_id
         member_indices = np.where(mask)[0]
+        member_titles: list[str] = [unique_titles[i] for i in member_indices]
 
         role_label, top_titles, centroid = _label_cluster(
             cluster_id,
@@ -211,6 +247,19 @@ def discover_roles(config: Config) -> pd.DataFrame:
             top_k=3,
         )
 
+        characteristic_profile: dict[str, float] = {}
+        if characteristics_df is not None:
+            cluster_chars = characteristics_df[
+                characteristics_df["extracted_title"].isin(member_titles)
+            ]
+            if not cluster_chars.empty:
+                characteristic_profile = (
+                    cluster_chars.groupby("characteristic_id")["confidence"]
+                    .mean()
+                    .round(4)
+                    .to_dict()
+                )
+
         roles.append(
             {
                 "role_id": int(cluster_id),
@@ -219,6 +268,9 @@ def discover_roles(config: Config) -> pd.DataFrame:
                 "top_titles": json.dumps(top_titles, ensure_ascii=False),
                 "member_count": int(mask.sum()),
                 "noise_flag": bool(cluster_id == -1),
+                "characteristic_profile": json.dumps(
+                    characteristic_profile, ensure_ascii=False
+                ),
             }
         )
 

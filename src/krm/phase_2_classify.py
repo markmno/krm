@@ -100,17 +100,18 @@ _NLI_CATEGORY_MAP: list[str] = [STEM_RESEARCH, PURE_IT, NON_STEM]
 # ---------------------------------------------------------------------------
 
 
-def _extract_vacancy_text(data: dict[str, Any]) -> tuple[str | None, str | None]:
+def _extract_vacancy_text(data: dict[str, Any]) -> tuple[str, str]:
     """Extract title and description from a raw vacancy data dict.
 
     Args:
         data: Raw HH.ru vacancy JSON dict as stored in DuckDB.
 
     Returns:
-        ``(title, description)``. Either value may be ``None`` if missing.
+        ``(title, description)``. Missing values are normalised to ``""`` so
+        downstream regex/NLI code never sees ``None``/``NaN``.
     """
-    title = data.get("name")
-    description = data.get("description")
+    title = data.get("name") or ""
+    description = data.get("description") or ""
     return title, description
 
 
@@ -216,7 +217,7 @@ def classify_vacancies(config: Config) -> pd.DataFrame:
         ``description``, ``stem_category``, ``nli_scores_json``.
     """
     # -- Stage 0: load raw vacancies ------------------------------------------
-    conn = get_connection()
+    conn = get_connection(config.db_path)
     try:
         df = conn.execute(
             "SELECT id AS vacancy_id, data FROM raw_vacancies"

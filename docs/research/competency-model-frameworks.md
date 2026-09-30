@@ -255,11 +255,11 @@ Every framework converges on the same structure:
 
 ```
                      ← COMPETENCY DIMENSIONS →
-                   Domain   Technical   Data    Communication   Management
+                        Domain   Tech      Data      Communication  Management
            ↑
            │ L7/ГНС     ████     ██        ██        █████          █████
-   ROLE     │ L5/СНС     █████    ████      ████      ███            ███
-   LEVEL    │ L3/НС      ██████   █████     █████     ██             █
+   ROLE    │ L5/СНС     █████    ████      ████      ███            ███
+   LEVEL   │ L3/НС      ██████   █████     █████     ██             █
            │ L2/МНС     ███      ██        ░         ░              ░
            ↓ L1/лаб     ██       ░         ░         ░              ░
 ```

@@ -2,6 +2,11 @@
 
 Wrapper around sentence-transformers with on-disk caching to avoid
 re-encoding the same texts across pipeline runs.
+
+Supports text-enrichment grounding: characteristic labels can be prepended
+to job title text before E5 encoding via :func:`build_title_characteristics`
+and :meth:`Embedder.enrich_titles`, so the model integrates attribute signal
+into token-level embeddings.
 """
 
 from __future__ import annotations
@@ -11,6 +16,46 @@ import pickle
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
+
+
+def build_title_characteristics(
+    dimensions_df: pd.DataFrame, top_n: int = 2
+) -> dict[str, list[str]]:
+    """Build a mapping from job title to its top characteristic labels.
+
+    Groups a DataFrame of (vacancy_id, title, characteristic_label, confidence)
+    by title, ranking characteristics by their mean confidence.
+
+    Args:
+        dimensions_df: DataFrame with columns ``title``, ``characteristic_label``,
+            and ``confidence``.
+        top_n: Number of top characteristic labels to select per title.
+
+    Returns:
+        ``dict[title, [label1, label2, ...]]`` — titles with no characteristics
+        are omitted from the result.
+    """
+    required_cols = {"title", "characteristic_label", "confidence"}
+    missing = required_cols - set(dimensions_df.columns)
+    if missing:
+        msg = f"DataFrame missing required columns: {missing}"
+        raise KeyError(msg)
+
+    grouped = (
+        dimensions_df.groupby(["title", "characteristic_label"])["confidence"]
+        .mean()
+        .reset_index()
+    )
+    grouped = grouped.sort_values(
+        ["title", "confidence"], ascending=[True, False]
+    )
+
+    result: dict[str, list[str]] = {}
+    for title, grp in grouped.groupby("title"):
+        labels = grp["characteristic_label"].head(top_n).tolist()
+        result[str(title)] = labels
+    return result
 
 
 class EmbeddingCache:
@@ -55,28 +100,106 @@ class EmbeddingCache:
 
 
 class Embedder:
-    """Lazily-loaded sentence-transformer with caching."""
+    """Lazily-loaded sentence-transformer with caching and text enrichment.
+
+    Supports text-enrichment grounding: characteristic labels can be prepended
+    to title text before encoding so the E5 model integrates attribute signal
+    into token-level embeddings (analogous to STR/DEX/INT attributes on a
+    character sheet).
+
+    The ``"passage: "`` prefix signals symmetric comparison (E5 convention),
+    and preceding ``"characteristics: ...; "`` context provides semantic
+    grounding.  Characteristics are NOT concatenated post-hoc as numpy arrays;
+    they become part of the input text the model actually reads.
+    """
 
     def __init__(
         self,
-        model_name: str = "intfloat/multilingual-e5-large-instruct",
+        model_name: str = "deepvk/USER-bge-m3",
         cache_dir: Path | str = "data/embeddings_cache",
+        device: str | None = None,
     ) -> None:
         self.model_name = model_name
         self.cache = EmbeddingCache(cache_dir)
+        self._device = device
         self._model: object | None = None
+
+    def _resolve_device(self) -> str:
+        if self._device is not None:
+            return self._device
+        import torch
+
+        return "cuda" if torch.cuda.is_available() else "cpu"
 
     @property
     def model(self) -> object:
         if self._model is None:
             from sentence_transformers import SentenceTransformer
 
-            self._model = SentenceTransformer(self.model_name, trust_remote_code=True)
+            self._model = SentenceTransformer(
+                self.model_name,
+                device=self._resolve_device(),
+                trust_remote_code=True,
+            )
         return self._model
 
-    def encode(self, texts: list[str], batch_size: int = 32) -> np.ndarray:
-        """Encode texts with caching. E5 models need 'query: ' prefix."""
-        prefixed = [f"query: {t}" for t in texts]
+    @staticmethod
+    def enrich_titles(
+        titles: list[str],
+        title_characteristics: dict[str, list[str]],
+    ) -> list[str]:
+        """Prepend characteristic labels to title strings for text-enrichment grounding.
+
+        For each title, looks up its characteristic labels in
+        ``title_characteristics`` and produces an enriched string of the form
+        ``"characteristics: {label1}, {label2}; passage: {title}"``.
+
+        Titles with no characteristics entry are left as ``"passage: {title}"``
+        without enrichment.
+
+        Args:
+            titles: Raw job title strings.
+            title_characteristics: Mapping from title → list of characteristic
+                label strings (e.g. ``{"Химик-аналитик": ["Экспериментальный опыт", "Анализ данных"]}``).
+
+        Returns:
+            Enriched text strings, one per input title, ready for E5 encoding.
+        """
+        enriched: list[str] = []
+        for title in titles:
+            chars = title_characteristics.get(title)
+            if chars:
+                char_str = ", ".join(chars)
+                enriched.append(f"characteristics: {char_str}; {title}")
+            else:
+                enriched.append(title)
+        return enriched
+
+    def encode(
+        self,
+        texts: list[str],
+        batch_size: int = 32,
+        *,
+        enriched_titles: list[str] | None = None,
+    ) -> np.ndarray:
+        """Encode texts with caching and optional text-enrichment grounding.
+
+        Args:
+            texts: Raw texts to encode.
+            batch_size: Number of texts per model forward pass.
+            enriched_titles: Pre-enriched title strings produced by
+                :meth:`enrich_titles`.  When provided, these are encoded
+                and cached instead of the ``"passage: {t}"`` prefixes
+                (so different enrichment of the same base title produces
+                independent cache entries).
+
+        Returns:
+            Normalised embedding matrix of shape ``(len(texts), dim)``.
+        """
+        if enriched_titles is not None:
+            prefixed = enriched_titles
+        else:
+            prefixed = list(texts)
 
         uncached, cached_embs, cached_idx = self.cache.batch_get(prefixed)
 
@@ -109,4 +232,7 @@ class Embedder:
 
     @property
     def dim(self) -> int:
-        return self.model.get_sentence_embedding_dimension() or 1024
+        model = self.model
+        if hasattr(model, "get_embedding_dimension"):
+            return model.get_embedding_dimension() or 1024
+        return model.get_sentence_embedding_dimension() or 1024

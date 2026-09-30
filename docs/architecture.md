@@ -9,8 +9,8 @@ Parquet-файлы с предыдущей фазы и записывающий 
 
 Основное отличие от hh-competency v0.1: роли обнаруживаются из **названий
 должностей** (embeddings + UMAP + HDBSCAN), а не из кластеризации навыков.
-Оси компетенций — **фиксированы** (6 характеристик исследователя), навыки
-маппятся на оси через zero-shot NLI, а не regex-правила.
+Оси компетенций — **фиксированы** (7 hard-характеристик исследователя + 4
+soft-компетенции), навыки маппятся на оси через zero-shot NLI, а не regex-правила.
 
 ## 7-фазный пайплайн
 
@@ -18,11 +18,13 @@ Parquet-файлы с предыдущей фазы и записывающий 
 ┌──────────┐    ┌──────────────┐    ┌───────────────┐    ┌──────────────┐    ┌──────────────┐    ┌───────────────┐    ┌─────────────┐
 │ PHASE 1  │───▶│   PHASE 2    │───▶│    PHASE 3    │───▶│   PHASE 4    │───▶│   PHASE 5    │───▶│    PHASE 6    │───▶│   PHASE 7   │
 │ Collect  │    │  Classify    │    │   Cluster     │    │   Extract    │    │   Map to     │    │    Build      │    │  Validate   │
-│ Vacancies│    │ STEM/IT/non  │    │  Job Titles   │    │   Skills     │    │  6 Axes      │    │ Competencies  │    │  & Export   │
+│ Vacancies│    │ STEM/IT/non  │    │  Job Titles   │    │   Skills     │    │  7 Axes      │    │ Competencies  │    │  & Export   │
 └──────────┘    └──────────────┘    └───────────────┘    └──────────────┘    └──────────────┘    └───────────────┘    └─────────────┘
       │               │                   │                    │                   │                    │                   │
       ▼               ▼                   ▼                    ▼                   ▼                    ▼                   ▼
-  raw/*.parquet  classified.parquet   roles.parquet       skills_per_role.parquet  axis_scores.parquet   models/*.json     reports/
+  raw/*.parquet  classified.parquet   roles.parquet       skills_per_role.parquet  characteristic_scores.parquet  models/*.json     reports/
+                                                        vacancy_roles.parquet   soft_scores.parquet
+                                                        skill_characteristic_scores.parquet  role_archetypes.parquet
 
 config.yaml (единый источник параметров: модели, пороги, пути)
 ```
@@ -103,45 +105,85 @@ config.yaml (единый источник параметров: модели, �
 **Некаталогизированные навыки** (cosine < 0.7 с ESCO): сохраняются в
 `uncatalogued_skills` и отправляются на ручную классификацию.
 
-### Фаза 5: Маппинг навыков на 6 осей (`phase_5_axes.py`)
+### Фаза 5: Маппинг навыков на 7 осей (`phase_5_axes.py`)
 
 **Вход**: `data/skills_per_role.parquet`
 
-**Выход**: `data/axis_scores.parquet` (role_id, axis_name, proficiency_1_to_5, top_contributing_skills)
+**Выход**: `data/characteristic_scores.parquet` (role_id, axis_name, proficiency_1_to_5, top_contributing_skills) + `data/skill_characteristic_scores.parquet` (skill_canonical_name, characteristic_id, nli_score)
 
-**6 фиксированных осей** (заданы в `config.yaml`, не обнаруживаются из данных):
+**7 фиксированных осей** (заданы в `config.yaml`, не обнаруживаются из данных):
 
 | # | Ось | NLI-гипотеза |
 |---|-----|-------------|
-| 1 | Экспериментальный опыт | "This skill involves hands-on laboratory or field experimental work" |
-| 2 | Предметные знания | "This skill involves theoretical or conceptual understanding of a scientific domain" |
-| 3 | Управление и коммуникации | "This skill involves project management, team coordination, or scientific communication" |
-| 4 | Научная литература и документация | "This skill involves reading, writing, or organizing scientific documents" |
-| 5 | Анализ данных и статистика | "This skill involves statistical analysis, data processing, or quantitative research" |
-| 6 | Вычислительные методы | "This skill involves computational modeling, simulation, or algorithm development" |
+| 1 | Доменная база | "This skill requires deep theoretical or applied knowledge in a specific scientific or technical domain." |
+| 2 | Эксперимент | "This skill involves hands-on laboratory or field experimental work with equipment, organisms, or materials." |
+| 3 | Анализ данных | "This skill involves analyzing data, performing statistical tests, or applying quantitative methods." |
+| 4 | Вычислительные методы | "This skill involves computational modeling, programming, algorithm development, or numerical methods." |
+| 5 | Профессиональные тексты | "This skill involves writing, reading, or working with professional and scientific texts, documentation, publications, and reports." |
+| 6 | T-профиль | "This skill reflects broad erudition and interdisciplinary breadth — knowledge that spans multiple STEM fields beyond a single specialty." |
+| 7 | Управление | "This skill involves managing teams, projects, budgets, or organizational processes." |
 
 **Алгоритм**:
-1. Для каждого навыка: zero-shot NLI (`bart-large-mnli`) против 6 гипотез
+1. Для каждого навыка: zero-shot NLI (`bart-large-mnli`) против 7 гипотез
 2. Мягкое распределение: один навык может принадлежать нескольким осям
    (e.g., "молекулярная динамика" → 0.7 domain_knowledge, 0.6 computational)
 3. Аггрегация на роль: `proficiency = Σ(skill.tfidf_weight × axis_score) / Σ(all_weights)`
 4. Нормализация: шкала 1–5 (ознакомительный → экспертный)
 
-**Валидация**: Spearman ρ ≥ 0.75 против экспертных оценок (3 роли × 6 осей = 18 суждений).
+**Валидация**: Spearman ρ ≥ 0.75 против экспертных оценок (3 роли × 7 осей = 21 суждение).
 
-### Фаза 6: Построение компетентностных моделей и spider charts (`phase_6_model.py`)
+### Фаза 5b: Soft-компетенции и архетипы (`phase_5b_soft.py`)
 
-**Вход**: `data/axis_scores.parquet` + `data/roles.parquet`
+**Вход**: `data/classified.parquet` + `data/skills_per_role.parquet` + `data/vacancy_roles.parquet`
 
-**Выход**: `models/{role_id}.json` + `reports/spider_charts/{role_id}.png`
+**Выход**: `data/role_archetypes.parquet` (role_id, archetype, super_fractions) + `data/soft_scores.parquet` (role_id, soft_id, proficiency)
+
+**4 soft-компетенции** (новый параллельный NLI-путь над текстом вакансий):
+
+| # | Soft-компетенция | NLI-гипотеза |
+|---|------------------|-------------|
+| 1 | Мышление | critical thinking, analytical reasoning, problem-solving, intellectual creativity |
+| 2 | Командное Взаимодействие | teamwork, collaboration, coordinating with colleagues, interdisciplinary cooperation |
+| 3 | Ответственность и Лидерство | taking responsibility, leading people or projects, decision-making, mentoring |
+| 4 | Профессиональная культура | professional ethics, scientific integrity, adherence to standards and norms |
+
+**Алгоритм**:
+1. Классификация архетипа роли по топ-20 определяющим навыкам (`classify_archetypes`).
+2. Для каждой роли: NLI каждой вакансии против 4 гипотез → `raw[axis] = средний entailment`.
+3. **Гейт, затем нормализация**: ось считается прошедшей, если `raw >= confidence_threshold` И число описаний `>= min_descriptions`; нормализация min-max в [1,5] только по прошедшим осям.
+4. Fallback: для не прошедших осей берётся значение из **per-archetype baseline** (см. ниже).
+
+**Per-archetype baseline** (задаётся в `config.yaml`, уже в шкале 1–5; используется как fallback, когда NLI-сигнал слаб):
+
+| Архетип | Мышление | Командное | Ответственность | Проф. культура |
+|---------|----------|-----------|-----------------|----------------|
+| Техник | 2 | 2 | 1 | 2 |
+| Исследователь | 4 | 3 | 2 | 3 |
+| Методолог | 4 | 3 | 2 | 3 |
+| Инженер | 3 | 2 | 2 | 2 |
+| Ведущий специалист | 4 | 4 | 4 | 4 |
+| Гибрид | 4 | 3 | 3 | 3 |
+
+### Фаза 6: Построение компетентностных моделей и 4 диаграмм на роль (`phase_6_model.py`)
+
+**Вход**: `data/characteristic_scores.parquet` + `data/roles.parquet` + `data/soft_scores.parquet` + `data/role_archetypes.parquet` + `data/vacancy_roles.parquet` + `data/skill_characteristic_scores.parquet` + `data/skills_per_role.parquet` + `data/characteristics.parquet`
+
+**Выход**: `models/{role_id}.json` + 4 PNG на роль
 
 **Компетентностная модель JSON**:
-- Role label и топ-10 названий должностей
+- Role label, архетип и топ-10 названий должностей
 - 7-уровневая шкала (бакалавр → ГНС)
-- Per-axis proficiency (1–5) + топ-3 навыка-драйвера
+- Per-axis proficiency (1–5) по 7 hard-осям + топ-3 навыка-драйвера
+- 4 soft-компетенции (proficiency 1–5)
+- Гистограмма опыта (бины `[0–1, 1–3, 3–5, 5–10, 10+]` + "не указан" + медиана)
+- Топ-15 навыков с весами по осям
 - Кросс-референсы на Profstandart 40.008 и 40.011
 
-**Spider chart**: 6 осей, шкала 1–5, подписи на русском, matplotlib (публикационный PNG).
+**4 диаграммы на роль** (по одной PNG на тип):
+1. **Experience** — гистограмма требуемых лет опыта (`reports/<domain>/experience/{role_id}.png`)
+2. **Hard competences** — 7-осевая spider chart (`reports/<domain>/hard/{role_id}.png`)
+3. **Soft competences** — 4-осевая spider chart (`reports/<domain>/soft/{role_id}.png`)
+4. **Skills** — топ-15 горизонтальных баров, сегментированных по осям (`reports/<domain>/skills/{role_id}.png`)
 
 ### Фаза 7: Валидация и отчёты (`phase_7_validate.py`)
 
@@ -156,7 +198,7 @@ config.yaml (единый источник параметров: модели, �
 | 2 — Классификация | F1 (STEM vs non-STEM) | 200 размеченных вакансий | ≥ 0.92 |
 | 3 — Кластеризация | Silhouette + DBI + bootstrap ARI | Внутренняя + экспертная | Silhouette > 0.4, ARI > 0.7 |
 | 4 — Извлечение навыков | Precision@10 | Экспертная разметка топ-20 | ≥ 0.85 |
-| 5 — Маппинг осей | Spearman ρ vs эксперт | 3 роли × 6 осей | ≥ 0.75 |
+| 5 — Маппинг осей | Spearman ρ vs эксперт | 3 роли × 7 осей | ≥ 0.75 |
 | 6 — Валидность модели | Структурная проверка | Автоматическая валидация JSON | 100% valid |
 | Интеграция | Coverage | % вакансий с полной моделью | ≥ 85% |
 
@@ -179,8 +221,9 @@ krm/
 │   ├── phase_2_classify.py         # STEM/IT/NON_STEM классификатор
 │   ├── phase_3_roles.py            # Кластеризация названий должностей → РОЛИ
 │   ├── phase_4_skills.py           # Извлечение навыков на роль
-│   ├── phase_5_axes.py             # Zero-shot маппинг навыков → 6 осей
-│   ├── phase_6_model.py            # Компетентностная модель + spider charts
+│   ├── phase_5_axes.py             # Zero-shot маппинг навыков → 7 осей
+│   ├── phase_5b_soft.py            # Архетипы + soft-компетенции
+│   ├── phase_6_model.py            # Компетентностная модель + 4 диаграммы
 │   └── phase_7_validate.py         # Полная валидация + отчёты
 ├── tests/
 │   ├── conftest.py
@@ -192,8 +235,13 @@ krm/
 │   ├── raw/
 │   ├── classified.parquet
 │   ├── roles.parquet
+│   ├── characteristics.parquet
 │   ├── skills_per_role.parquet
-│   └── axis_scores.parquet
+│   ├── vacancy_roles.parquet
+│   ├── characteristic_scores.parquet
+│   ├── skill_characteristic_scores.parquet
+│   ├── role_archetypes.parquet
+│   └── soft_scores.parquet
 ├── models/                         # Компетентностные модели JSON
 ├── reports/                        # Валидация, spider charts PNG
 └── docs/
@@ -247,25 +295,38 @@ skills:
   fuzzy_threshold: 0.7
   tfidf_max_features: 5000
 
-axes:  # FIXED — never modified by pipeline
-  - id: experimental
-    label_ru: Экспериментальный опыт
-    hypothesis: "This skill involves hands-on laboratory or field experimental work"
-  - id: domain_knowledge
-    label_ru: Предметные знания
-    hypothesis: "This skill involves theoretical or conceptual understanding of a scientific domain"
-  - id: management
-    label_ru: Управление и коммуникации
-    hypothesis: "This skill involves project management, team coordination, or scientific communication"
-  - id: literature
-    label_ru: Научная литература и документация
-    hypothesis: "This skill involves reading, writing, or organizing scientific documents"
-  - id: data_analysis
-    label_ru: Анализ данных и статистика
-    hypothesis: "This skill involves statistical analysis, data processing, or quantitative research"
-  - id: computational
-    label_ru: Вычислительные методы
-    hypothesis: "This skill involves computational modeling, simulation, or algorithm development"
+characteristics:  # FIXED — never modified by pipeline
+  model: facebook/bart-large-mnli
+  confidence_threshold: 0.3
+  hypotheses:
+    - id: domain_knowledge
+      label_ru: Доменная база
+      label_en: Domain Knowledge
+      hypothesis: "This skill requires deep theoretical or applied knowledge in a specific scientific or technical domain."
+    - id: experimental
+      label_ru: Эксперимент
+      label_en: Experimental Work
+      hypothesis: "This skill involves hands-on laboratory or field experimental work with equipment, organisms, or materials."
+    - id: data_analysis
+      label_ru: Анализ данных
+      label_en: Data Analysis
+      hypothesis: "This skill involves analyzing data, performing statistical tests, or applying quantitative methods."
+    - id: computational
+      label_ru: Вычислительные методы
+      label_en: Computational Methods
+      hypothesis: "This skill involves computational modeling, programming, algorithm development, or numerical methods."
+    - id: professional_texts
+      label_ru: Профессиональные тексты
+      label_en: Professional Texts
+      hypothesis: "This skill involves writing, reading, or working with professional and scientific texts, documentation, publications, and reports."
+    - id: t_profile
+      label_ru: T-профиль
+      label_en: T-Profile
+      hypothesis: "This skill reflects broad erudition and interdisciplinary breadth — knowledge that spans multiple STEM fields beyond a single specialty."
+    - id: management
+      label_ru: Управление
+      label_en: Management & Organization
+      hypothesis: "This skill involves managing teams, projects, budgets, or organizational processes."
 
 testing:
   classification_sample_size: 200
@@ -283,7 +344,7 @@ bootstrap-валидированные метрики, выбирает опти
 
 **Стало**: Оси фиксированы в `config.yaml`. Навыки маппятся на оси через
 zero-shot NLI. Это решение принято по требованию заказчика: оси должны
-соответствовать 6 характеристикам исследователя, а не открываться из данных.
+соответствовать 7 характеристикам исследователя (и 4 soft-компетенциям), а не открываться из данных.
 
 ### 2. Кластеризация названий должностей вместо навыков
 

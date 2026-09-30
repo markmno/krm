@@ -73,18 +73,19 @@ STEM/IT → кластеризация должностей в роли → из
 
 Метрика: Precision@10 >= 0.85 (экспертная разметка)
 
-### Фаза 5: Маппинг на 6 осей
+### Фаза 5: Маппинг на 7 осей
 
-6 фиксированных осей (из config.yaml, НЕ обнаруживаются):
+7 фиксированных осей (из config.yaml, НЕ обнаруживаются):
 
 | Ось | NLI-гипотеза |
 |-----|-------------|
-| Экспериментальный опыт | hands-on laboratory or field experimental work |
-| Предметные знания | theoretical understanding of a scientific domain |
-| Управление и коммуникации | project management, coordination, communication |
-| Научная литература | reading, writing, organizing scientific documents |
-| Анализ данных | statistical analysis, data processing, quantitative |
-| Вычислительные методы | computational modeling, simulation, algorithm |
+| Доменная база | deep theoretical or applied knowledge in a specific scientific or technical domain |
+| Эксперимент | hands-on laboratory or field experimental work |
+| Анализ данных | analyzing data, statistical tests, or quantitative methods |
+| Вычислительные методы | computational modeling, programming, algorithms, or numerical methods |
+| Профессиональные тексты | writing, reading, or working with professional and scientific texts |
+| T-профиль | broad erudition and interdisciplinary breadth across multiple STEM fields |
+| Управление | managing teams, projects, budgets, or organizational processes |
 
 Алгоритм: zero-shot NLI на каждый навык → мягкое распределение → 
 агрегация на роль → нормализация шкала 1-5.

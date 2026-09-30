@@ -77,14 +77,17 @@ def sample_skills_per_role() -> pd.DataFrame:
 
 
 @pytest.fixture
-def sample_axis_scores() -> pd.DataFrame:
+def sample_characteristic_scores() -> pd.DataFrame:
     rng = np.random.default_rng(42)
     rows = []
     for role_id in range(4):
-        for axis_id in ["experimental", "domain_knowledge", "management", "literature", "data_analysis", "computational"]:
+        for characteristic_id in [
+            "domain_knowledge", "experimental", "data_analysis", "computational",
+            "professional_texts", "t_profile", "management",
+        ]:
             rows.append({
                 "role_id": role_id,
-                "axis_id": axis_id,
+                "characteristic_id": characteristic_id,
                 "proficiency": round(float(rng.uniform(1.0, 5.0)), 2),
                 "top_contributing_skills": json.dumps(["skill_a", "skill_b", "skill_c"]),
             })
