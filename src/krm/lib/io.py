@@ -6,12 +6,11 @@ consistent read/write helpers with schema validation.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
-import pyarrow as pa
-
 
 # --- Parquet helpers -----------------------------------------------------------
 
@@ -30,8 +29,6 @@ def write_parquet(df: pd.DataFrame, path: Path | str) -> None:
 
 def read_jsonl(path: Path | str) -> list[dict[str, Any]]:
     """Read a JSONL file into a list of dicts."""
-    import json
-
     records: list[dict[str, Any]] = []
     with open(path, encoding="utf-8") as f:
         for line in f:
@@ -43,8 +40,6 @@ def read_jsonl(path: Path | str) -> list[dict[str, Any]]:
 
 def write_jsonl(records: list[dict[str, Any]], path: Path | str) -> None:
     """Write a list of dicts to a JSONL file."""
-    import json
-
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "w", encoding="utf-8") as f:
@@ -89,8 +84,6 @@ def init_tables(conn: Any) -> None:
 
 def upsert_raw_vacancy(conn: Any, run_id: str, vacancy_id: str, data: dict[str, Any]) -> None:
     """Insert or ignore a raw vacancy record."""
-    import json
-
     conn.execute(
         "INSERT OR IGNORE INTO raw_vacancies (id, run_id, data) VALUES (?, ?, ?)",
         [vacancy_id, run_id, json.dumps(data, ensure_ascii=False)],

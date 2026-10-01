@@ -6,8 +6,6 @@ skills via a TF-IDF-inspired scoring method.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Tuple
-
 
 class SkillComparator:
     """Compare skill profiles across specialties.
@@ -20,7 +18,7 @@ class SkillComparator:
         _freqs: Nested dict mapping specialty → {skill_lemma → count}.
     """
 
-    def __init__(self, skill_frequencies: Dict[str, Dict[str, int]]) -> None:
+    def __init__(self, skill_frequencies: dict[str, dict[str, int]]) -> None:
         """Initialize with pre-computed skill frequency data.
 
         Args:
@@ -31,8 +29,8 @@ class SkillComparator:
         self._freqs = skill_frequencies
 
     def compare(
-        self, specialties: List[str], top_n: int = 30
-    ) -> Dict[str, List[Tuple[str, int]]]:
+        self, specialties: list[str], top_n: int = 30
+    ) -> dict[str, list[tuple[str, int]]]:
         """Get top N skills for each specialty.
 
         Args:
@@ -43,7 +41,7 @@ class SkillComparator:
             Dict mapping specialty → list of (skill_lemma, count) sorted
             by count descending.
         """
-        result: Dict[str, List[Tuple[str, int]]] = {}
+        result: dict[str, list[tuple[str, int]]] = {}
         for spec in specialties:
             freq = self._freqs.get(spec, {})
             sorted_skills = sorted(freq.items(), key=lambda x: x[1], reverse=True)
@@ -53,9 +51,9 @@ class SkillComparator:
     def unique_skills(
         self,
         specialty: str,
-        vs_specialties: List[str],
+        vs_specialties: list[str],
         min_count: int = 3,
-    ) -> List[str]:
+    ) -> list[str]:
         """Find skills unique to one specialty compared to a set of others.
 
         A skill is unique if it appears in the target specialty (≥ min_count)
@@ -75,7 +73,6 @@ class SkillComparator:
             lemma for lemma, count in target_freq.items() if count >= min_count
         }
 
-        # Collect all lemmas from comparison specialties
         other_lemmas: set[str] = set()
         for vs_spec in vs_specialties:
             vs_freq = self._freqs.get(vs_spec, {})
@@ -85,8 +82,8 @@ class SkillComparator:
         return sorted(unique)
 
     def shared_skills(
-        self, specialties: List[str], min_count: int = 3
-    ) -> List[str]:
+        self, specialties: list[str], min_count: int = 3
+    ) -> list[str]:
         """Find skills shared across all specified specialties.
 
         Args:
@@ -99,7 +96,7 @@ class SkillComparator:
         if not specialties:
             return []
 
-        skill_sets: List[set[str]] = []
+        skill_sets: list[set[str]] = []
         for spec in specialties:
             freq = self._freqs.get(spec, {})
             lemmas = {
@@ -114,8 +111,8 @@ class SkillComparator:
         return sorted(shared)
 
     def overlap_matrix(
-        self, specialties: List[str]
-    ) -> Dict[str, Dict[str, float]]:
+        self, specialties: list[str]
+    ) -> dict[str, dict[str, float]]:
         """Compute pairwise Jaccard similarity between specialty skill sets.
 
         Jaccard(A, B) = |A ∩ B| / |A ∪ B|, using all skills with frequency ≥ 1.
@@ -127,13 +124,12 @@ class SkillComparator:
             Nested dict: matrix[spec_a][spec_b] = Jaccard similarity (0.0–1.0).
             Diagonal entries (spec_a == spec_b) are 1.0.
         """
-        # Load all skill sets
-        lemma_sets: Dict[str, set[str]] = {}
+        lemma_sets: dict[str, set[str]] = {}
         for spec in specialties:
             freq = self._freqs.get(spec, {})
             lemma_sets[spec] = set(freq.keys())
 
-        matrix: Dict[str, Dict[str, float]] = {}
+        matrix: dict[str, dict[str, float]] = {}
         for spec_a in specialties:
             matrix[spec_a] = {}
             set_a = lemma_sets.get(spec_a, set())
@@ -155,7 +151,7 @@ class SkillComparator:
         specialty_a: str,
         specialty_b: str,
         top_n: int = 10,
-    ) -> Dict[str, List[Tuple[str, float]]]:
+    ) -> dict[str, list[tuple[str, float]]]:
         """Find skills that differentiate specialty A from B.
 
         Uses TF-IDF-inspired scoring: score = freq_A / (1 + freq_B).
@@ -174,9 +170,9 @@ class SkillComparator:
         freq_b = self._freqs.get(specialty_b, {})
 
         def _score(
-            primary: Dict[str, int], other: Dict[str, int]
-        ) -> List[Tuple[str, float]]:
-            scores: List[Tuple[str, float]] = []
+            primary: dict[str, int], other: dict[str, int]
+        ) -> list[tuple[str, float]]:
+            scores: list[tuple[str, float]] = []
             for lemma, f_primary in primary.items():
                 f_other = other.get(lemma, 0)
                 score = f_primary / (1.0 + f_other)

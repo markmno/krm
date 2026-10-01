@@ -17,11 +17,6 @@ from typing import Protocol
 from krm.lib.skill_categories import classify_skill_to_category as _classify_skill_to_category
 
 
-# ────────────────────────────────────────────────────────
-# Archetype type definition
-# ────────────────────────────────────────────────────────
-
-
 @dataclass(frozen=True)
 class RoleArchetype:
     """Defines an ISCB-inspired competency role archetype.
@@ -67,14 +62,6 @@ _SUPER_CATEGORIES: dict[str, str] = {
     "Фундаментальная физика и материаловедение": "domain",
 }
 
-
-# ────────────────────────────────────────────────────────
-# ISCB-inspired role archetypes
-# ────────────────────────────────────────────────────────
-
-# Each archetype describes what the role does, the typical career
-# progression, and the competency areas that should be emphasised
-# in training and evaluation.
 
 _ROLE_ARCHETYPES: list[RoleArchetype] = [
     RoleArchetype(
@@ -222,21 +209,11 @@ _ARCHETYPE_BY_NAME: dict[str, RoleArchetype] = {
 }
 
 
-# ────────────────────────────────────────────────────────
-# Role input protocol
-# ────────────────────────────────────────────────────────
-
-
 class _HasDefiningSkills(Protocol):
     """Protocol for role-like objects accepted by classify_archetypes."""
 
     role_name: str
     defining_skills: list[tuple[str, float]]
-
-
-# ────────────────────────────────────────────────────────
-# Classification result
-# ────────────────────────────────────────────────────────
 
 
 @dataclass(frozen=True)
@@ -255,11 +232,6 @@ class ArchetypeClassification:
     archetype: RoleArchetype
     super_fractions: dict[str, float]
     significant_categories: int
-
-
-# ────────────────────────────────────────────────────────
-# Public API
-# ────────────────────────────────────────────────────────
 
 
 def classify_archetypes(

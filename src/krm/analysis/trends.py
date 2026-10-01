@@ -7,10 +7,8 @@ All inputs are pre-computed Python dicts/lists — no database dependency.
 
 from __future__ import annotations
 
-from collections import Counter
 import math
-
-
+from collections import Counter
 
 __all__ = [
     "mann_kendall",
@@ -48,40 +46,17 @@ def _mann_kendall(values: list[float]) -> tuple[float, float, str]:
             elif diff < 0:
                 s -= 1
 
-    tau = s / (n * (n - 1) / 2) if n > 1 else 0.0
+    tau = s / (n * (n - 1) / 2)
 
     variance = n * (n - 1) * (2 * n + 5) / 18.0
-    if variance == 0:
-        return tau, 1.0, "stable"
-
     z = s / (variance ** 0.5)
-    p_value = 2 * (1.0 - 0.5 * (1.0 + math.erf(abs(z) / math.sqrt(2.0))))
+    p_value = math.erfc(abs(z) / math.sqrt(2.0))
 
     direction = "stable"
     if p_value < 0.05 or abs(tau) > 0.3:
         direction = "growing" if tau > 0 else "declining"
 
     return tau, p_value, direction
-
-
-def _linear_slope(years: list[int], values: list[float]) -> float:
-    """Simple linear regression slope. Positive = growing.
-
-    Args:
-        years: Year ordinals (e.g. [2020, 2021, 2022]).
-        values: Corresponding time series values.
-
-    Returns:
-        Slope of the linear regression line (units per year).
-    """
-    n = len(years)
-    if n < 2:
-        return 0.0
-    mean_yr = sum(years) / n
-    mean_val = sum(values) / n
-    num = sum((years[i] - mean_yr) * (values[i] - mean_val) for i in range(n))
-    den = sum((years[i] - mean_yr) ** 2 for i in range(n))
-    return num / den if den != 0 else 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +90,14 @@ def linear_slope(years: list[int], values: list[float]) -> float:
     Returns:
         Slope (units per year). Positive = growing, negative = declining.
     """
-    return _linear_slope(years, values)
+    n = len(years)
+    if n < 2:
+        return 0.0
+    mean_yr = sum(years) / n
+    mean_val = sum(values) / n
+    num = sum((years[i] - mean_yr) * (values[i] - mean_val) for i in range(n))
+    den = sum((years[i] - mean_yr) ** 2 for i in range(n))
+    return num / den if den != 0 else 0.0
 
 
 def analyze_trends(
@@ -193,8 +175,9 @@ def analyze_trends(
         values = [yearly_skills[yr].get(lemma, 0) for yr in years]
         if sum(values) < min_count:
             continue
-        tau, p, direction = _mann_kendall([float(v) for v in values])
-        slope = _linear_slope(years, [float(v) for v in values])
+        float_values = [float(v) for v in values]
+        tau, p, direction = _mann_kendall(float_values)
+        slope = linear_slope(years, float_values)
         skill_trends.append({
             "lemma": lemma,
             "years": {str(yr): yearly_skills[yr].get(lemma, 0) for yr in years},
@@ -309,16 +292,12 @@ def analyze_salary_trends(
     ]
 
     if trends:
-        median_values = [t["median"] for t in trends]
-        slope = _linear_slope(years, [float(v) for v in median_values])
-        tau, p, direction = _mann_kendall([float(v) for v in median_values])
+        median_values = [float(t["median"]) for t in trends]
+        slope = linear_slope(years, median_values)
+        tau, p, direction = _mann_kendall(median_values)
         salary_verdict = (
             "Медианная зарплата "
-            + (
-                "растёт"
-                if direction == "growing"
-                else "падает" if direction == "declining" else "стабильна"
-            )
+            + {"growing": "растёт", "declining": "падает"}.get(direction, "стабильна")
             + (
                 f" (tau={tau:.2f}, p={p:.3f})"
                 if p < 0.10

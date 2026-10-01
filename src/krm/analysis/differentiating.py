@@ -7,16 +7,14 @@ using a TF-IDF-inspired scoring method. Used as a pure data pipeline
 
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
-
 from krm.analysis.compare import SkillComparator
 
 
 def collect_differentiating_skills(
-    skill_frequencies: Dict[str, Dict[str, int]],
-    specialties: List[str],
+    skill_frequencies: dict[str, dict[str, int]],
+    specialties: list[str],
     top_n: int = 8,
-) -> List[Tuple[str, float, str]]:
+) -> list[tuple[str, float, str]]:
     """Collect the most differentiating skills across all specialty pairs.
 
     For each pair of specialties (A, B), uses :class:`SkillComparator` to
@@ -57,9 +55,9 @@ def collect_differentiating_skills(
 
     # Track the best score for each skill and which specialty it belongs to.
     # Key: skill lemma → max score seen so far.
-    skill_best_score: Dict[str, float] = {}
+    skill_best_score: dict[str, float] = {}
     # Key: skill lemma → specialty where the skill had its best score.
-    skill_source: Dict[str, str] = {}
+    skill_source: dict[str, str] = {}
 
     for i in range(len(specialties)):
         for j in range(i + 1, len(specialties)):
@@ -68,13 +66,11 @@ def collect_differentiating_skills(
 
             diff = comparator.differentiating_skills(spec_a, spec_b, top_n=20)
 
-            # Skills that differentiate specialty A from B
             for lemma, score in diff["a_vs_b"]:
                 if score > skill_best_score.get(lemma, 0.0):
                     skill_best_score[lemma] = score
                     skill_source[lemma] = spec_a
 
-            # Skills that differentiate specialty B from A
             for lemma, score in diff["b_vs_a"]:
                 if score > skill_best_score.get(lemma, 0.0):
                     skill_best_score[lemma] = score
@@ -83,7 +79,6 @@ def collect_differentiating_skills(
     if not skill_best_score:
         return []
 
-    # Sort by differentiation score descending, pick top N
     sorted_skills = sorted(
         skill_best_score.items(), key=lambda x: x[1], reverse=True
     )

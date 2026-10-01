@@ -8,13 +8,16 @@ pipeline validation.
 from __future__ import annotations
 
 import numpy as np
+from scipy.stats import spearmanr
+from sklearn.cluster import HDBSCAN
 from sklearn.metrics import (
     adjusted_rand_score,
     davies_bouldin_score,
     f1_score,
     silhouette_score,
 )
-from scipy.stats import spearmanr
+
+_MIN_CLUSTER_SIZE = 5
 
 
 def compute_classification_f1(
@@ -42,21 +45,27 @@ def compute_clustering_metrics(
     Filters out noise points (label == -1) before computing.
     """
     mask = labels != -1
+    n_noise = int((~mask).sum())
     if mask.sum() < 2:
-        return {"silhouette": 0.0, "davies_bouldin": 0.0, "n_clusters": 0, "n_noise": int((~mask).sum())}
+        return {"silhouette": 0.0, "davies_bouldin": 0.0, "n_clusters": 0, "n_noise": n_noise}
 
     emb_filt = embeddings[mask]
     lab_filt = labels[mask]
     n_unique = len(set(lab_filt))
 
     if n_unique < 2:
-        return {"silhouette": 0.0, "davies_bouldin": 0.0, "n_clusters": n_unique, "n_noise": int((~mask).sum())}
+        return {
+            "silhouette": 0.0,
+            "davies_bouldin": 0.0,
+            "n_clusters": n_unique,
+            "n_noise": n_noise,
+        }
 
     return {
         "silhouette": float(silhouette_score(emb_filt, lab_filt)),
         "davies_bouldin": float(davies_bouldin_score(emb_filt, lab_filt)),
         "n_clusters": n_unique,
-        "n_noise": int((~mask).sum()),
+        "n_noise": n_noise,
     }
 
 
@@ -86,9 +95,7 @@ def compute_bootstrap_ari(
         sub_emb = emb_filt[idx_full]
         sub_lab = lab_filt[idx_full]
 
-        from sklearn.cluster import HDBSCAN
-
-        clusterer = HDBSCAN(min_cluster_size=min(5, len(sub_emb) // 3))
+        clusterer = HDBSCAN(min_cluster_size=min(_MIN_CLUSTER_SIZE, len(sub_emb) // 3))
         sub_pred = clusterer.fit_predict(sub_emb)
 
         valid = sub_pred != -1

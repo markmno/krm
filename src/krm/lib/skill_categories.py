@@ -141,7 +141,7 @@ def classify_skill_to_category(
         rules = CATEGORY_RULES
 
     skill_lower = skill_lemma.lower().strip()
-    for triggers, name_ru, _name_en in rules:
+    for triggers, name_ru, _ in rules:
         for trigger in triggers:
             # Trigger can be one word or multi-word
             if trigger in skill_lower or skill_lower in trigger:

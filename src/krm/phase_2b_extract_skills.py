@@ -1,18 +1,19 @@
 """Phase 2b: Russian Skill Phrase Extraction from Vacancy Descriptions.
 
-Extracts skill phrases from Russian vacancy descriptions using spaCy
-(``ru_core_news_lg`` — dependency parsing + lemmatization)
-and deduplicates via embedding-based clustering.
+Extracts skill phrases from Russian vacancy descriptions using either the
+shared LLM backend (``krm.lib.llm.LLMClient``) or a deterministic spaCy
+noun-phrase fallback, and deduplicates via embedding-based clustering.
 
 Pipeline:
     1. Reads raw vacancies from ``data/krm.duckdb`` (``raw_vacancies`` table).
-    2. Parses Russian description text with spaCy.
-    3. Extracts noun phrases via dependency-tree walking.
-    4. Filters: 1–4 word phrases, drops boilerplate.
-    5. Deduplicates globally using ``deepvk/USER-bge-m3`` embeddings +
+    2. Filters each description to skill-bearing sections (requirements +
+       responsibilities) via ``_filter_to_skill_sections``.
+    3. Extracts skills per vacancy via the LLM backend, merging explicit
+       ``key_skills``.
+    4. Deduplicates globally using ``deepvk/USER-bge-m3`` embeddings +
        cosine-similarity greedy clustering.
-    6. Computes TF-IDF weights across the full corpus.
-    7. Writes ``extracted_skills.parquet`` and ``skill_vocabulary.parquet``.
+    5. Computes TF-IDF weights across the full corpus.
+    6. Writes ``extracted_skills.parquet`` and ``skill_vocabulary.parquet``.
 
 Usage:
     from krm.config import Config
@@ -24,6 +25,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import math
 from collections import Counter
@@ -32,10 +34,29 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from loguru import logger
+from pydantic import BaseModel, field_validator
 
 from krm.config import Config
 from krm.lib.embeddings import Embedder
 from krm.lib.io import get_connection
+from krm.lib.llm import LLMPrompt, build_llm
+
+# ---------------------------------------------------------------------------
+# LLM skill-extraction constants (relocated from ``krm.lib.llm_skills``)
+# ---------------------------------------------------------------------------
+
+_SYSTEM_PROMPT = (
+    "Ты — эксперт по анализу вакансий. Извлеки из описания вакансии все "
+    "профессиональные навыки и компетенции (hard skills), которые требуются от "
+    "кандидата. Не включай условия труда, зарплату, бенефиты, график работы, "
+    "информацию о компании, требования к образованию или стажу. Каждый навык — "
+    "короткая фраза из 1–4 слов на русском. Верни строго JSON без пояснений: "
+    '{"skills": ["навык1", "навык2", ...]}'
+)
+
+_MAX_DESC_CHARS = 3000
+_SKILL_MIN_WORDS = 1
+_SKILL_MAX_WORDS = 4
 
 
 # ---------------------------------------------------------------------------
@@ -236,6 +257,74 @@ def _filter_phrases(
 
 
 # ---------------------------------------------------------------------------
+# Skill extraction (LLM via shared client, or deterministic spaCy fallback)
+# ---------------------------------------------------------------------------
+
+
+class SkillsResponse(BaseModel):
+    """Structured skill list returned by the LLM backend."""
+
+    skills: list[str] = []
+
+    @field_validator("skills", mode="before")
+    @classmethod
+    def _normalize_skills(cls, v: Any) -> list[str]:
+        if not isinstance(v, list):
+            return []
+        result: list[str] = []
+        seen: set[str] = set()
+        for raw in v:
+            if not isinstance(raw, str):
+                continue
+            s = raw.strip().lower()
+            if not s or s in seen:
+                continue
+            if not (_SKILL_MIN_WORDS <= len(s.split()) <= _SKILL_MAX_WORDS):
+                continue
+            seen.add(s)
+            result.append(s)
+        return result
+
+
+def _extract_skills_llm(descriptions: list[str], config: Config) -> list[list[str]]:
+    """Extract skill lists per description via the shared :class:`LLMClient`.
+
+    A ``None`` result (total failure for that item) maps to an empty list,
+    matching the legacy ``_parse_skills`` behaviour.
+    """
+    client = build_llm(config)
+    prompts = [
+        LLMPrompt(system=_SYSTEM_PROMPT, user=desc[:_MAX_DESC_CHARS])
+        for desc in descriptions
+    ]
+    results = asyncio.run(client.run_many(prompts, SkillsResponse))
+    return [result.skills if result is not None else [] for result in results]
+
+
+def _extract_skills_noun_phrases(
+    descriptions: list[str],
+) -> list[list[tuple[str, str]]]:
+    """Deterministic fallback: spaCy noun phrases as ``(text, lemma)`` tuples."""
+    nlp = _get_nlp()
+    per_desc: list[list[tuple[str, str]]] = []
+    for desc in descriptions:
+        phrases = _extract_noun_phrases(nlp(desc))
+        per_desc.append(_filter_phrases(phrases, _SKILL_MIN_WORDS, _SKILL_MAX_WORDS))
+    return per_desc
+
+
+def _extract_skills_per_desc(
+    descriptions: list[str],
+    config: Config,
+) -> list[list[tuple[str, str]]]:
+    """Dispatch LLM vs deterministic extraction into a uniform per-desc shape."""
+    if config.use_llm_phase_2b:
+        llm_skills = _extract_skills_llm(descriptions, config)
+        return [[(s, s) for s in skills] for skills in llm_skills]
+    return _extract_skills_noun_phrases(descriptions)
+
+
+# ---------------------------------------------------------------------------
 # Deduplication (embedding clustering)
 # ---------------------------------------------------------------------------
 
@@ -266,8 +355,8 @@ def _deduplicate_phrases(
     if n == 0:
         return []
     if n == 1:
-        t, l = unique[0]
-        return [(t, l, phrase_counts[(t, l)])]
+        t, lemma = unique[0]
+        return [(t, lemma, phrase_counts[(t, lemma)])]
 
     # Embed texts (use lemma for semantic comparability).
     texts_to_embed = [lemma for _, lemma in unique]
@@ -357,10 +446,11 @@ def extract_skills(
     Full pipeline:
 
     1. Reads ``raw_vacancies`` from ``data/krm.duckdb``.
-    2. For each non-empty description, extracts noun phrases via
-       spaCy ``ru_core_news_lg`` dependency parsing.
-    3. Filters phrases by word count (``min_phrase_length`` –
-       ``max_phrase_length``) and POS tags.
+    2. Filters each description to skill-bearing sections (requirements +
+       responsibilities) via ``_filter_to_skill_sections``.
+    3. Extracts skills per vacancy via the LLM backend or the deterministic
+       spaCy fallback (dispatching on ``config.use_llm_phase_2b``), merging
+       explicit ``key_skills``.
     4. Deduplicates globally via embedding clustering at
        ``similarity_threshold`` cosine.
     5. Filters low-frequency phrases (< ``min_doc_frequency`` vacancies).
@@ -389,8 +479,6 @@ def extract_skills(
             ``doc_count``    int — number of vacancies containing it.
             =============== =========================================
     """
-    min_phrase_len = config.skill_extraction_min_phrase_length
-    max_phrase_len = config.skill_extraction_max_phrase_length
     sim_threshold = config.skill_extraction_similarity_threshold
     min_doc_freq = config.skill_extraction_min_doc_frequency
     max_skills_per_vac = config.skill_extraction_max_skills_per_vacancy
@@ -416,7 +504,7 @@ def extract_skills(
     logger.info(f"[Phase 2b] Loaded {len(rows)} raw vacancies from DuckDB")
 
     # ------------------------------------------------------------------
-    # 2. Extract skills per vacancy (LLM via vLLM)
+    # 2. Extract skills per vacancy (LLM client or deterministic spaCy)
     # ------------------------------------------------------------------
     # vac_phrases: {vacancy_id: [(skill, skill), ...]}
     vac_phrases: dict[str, list[tuple[str, str]]] = {}
@@ -457,22 +545,24 @@ def extract_skills(
 
         descs.append((str(vac_id), desc, key_skills))
 
-    # Batch LLM skill extraction over the filtered descriptions.
-    from krm.lib.llm_skills import extract_skills as llm_extract_skills
+    # Batch skill extraction over the filtered descriptions (LLM or spaCy).
+    per_desc_phrases: list[list[tuple[str, str]]] = []
+    if descs:
+        per_desc_phrases = _extract_skills_per_desc(
+            [d for _, d, _ in descs], config
+        )
 
-    llm_skills = llm_extract_skills([d for _, d, _ in descs])
-
-    for (vac_id, _desc, key_skills), skills in zip(descs, llm_skills):
-        phrases: list[tuple[str, str]] = []
+    for (vac_id, _desc, key_skills), phrases in zip(descs, per_desc_phrases):
+        merged: list[tuple[str, str]] = []
         seen: set[str] = set()
-        for s in [*skills, *key_skills]:
-            s = s.strip().lower()
-            if not s or s in seen or len(s.split()) > 8:
+        for text, lemma in [*phrases, *((s, s) for s in key_skills)]:
+            text = text.strip().lower()
+            if not text or text in seen or len(text.split()) > 8:
                 continue
-            seen.add(s)
-            phrases.append((s, s))
-        if phrases:
-            vac_phrases[vac_id] = phrases
+            seen.add(text)
+            merged.append((text, lemma))
+        if merged:
+            vac_phrases[vac_id] = merged
 
     n_with_phrases = len(vac_phrases)
     msg = (
@@ -563,7 +653,7 @@ def extract_skills(
     # Re-filter vacancies to only keep frequent phrases.
     vac_filtered: dict[str, list[str]] = {}
     for vac_id, lemmas in vac_canonical_lemmas.items():
-        filtered_lemmas = [l for l in lemmas if l in kept_lemmas]
+        filtered_lemmas = [lemma for lemma in lemmas if lemma in kept_lemmas]
         if filtered_lemmas:
             vac_filtered[vac_id] = filtered_lemmas
 

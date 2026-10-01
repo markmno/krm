@@ -41,10 +41,6 @@ class ClusterStabilityTester:
     contingency tables, salary groups, or label matrices.
     """
 
-    # ------------------------------------------------------------------
-    # Specialty differentiation (chi-squared)
-    # ------------------------------------------------------------------
-
     def test_specialty_differentiation(
         self,
         contingency_table: dict[str, list[int]],
@@ -97,7 +93,6 @@ class ClusterStabilityTester:
         except ValueError:
             return _empty_chi2_result()
 
-        # Cramér's V effect size
         n = observed.sum()
         min_dim = min(observed.shape) - 1
         cramers_v = (
@@ -113,10 +108,6 @@ class ClusterStabilityTester:
             "row_labels": row_labels,
             "col_labels": [str(i) for i in range(n_cols)],
         }
-
-    # ------------------------------------------------------------------
-    # Salary by role (ANOVA)
-    # ------------------------------------------------------------------
 
     def test_salary_by_role(
         self,
@@ -147,7 +138,6 @@ class ClusterStabilityTester:
             - **sample_sizes** (*dict[str, int]*): Number of
               observations per role.
         """
-        # Filter roles with at least 3 observations
         valid_roles = {
             role: salaries
             for role, salaries in role_salaries.items()
@@ -157,7 +147,6 @@ class ClusterStabilityTester:
         if len(valid_roles) < 2:
             return _empty_anova_result()
 
-        # One-way ANOVA
         salary_groups = list(valid_roles.values())
         try:
             f_stat, p_value = f_oneway(*salary_groups)
@@ -201,7 +190,6 @@ class ClusterStabilityTester:
             except Exception:
                 tukey_result = None
 
-        # Median salary and sample sizes
         median_salary_by_role: dict[str, float] = {}
         sample_sizes: dict[str, int] = {}
         for role_name, salaries in valid_roles.items():
@@ -217,10 +205,6 @@ class ClusterStabilityTester:
             "median_salary_by_role": median_salary_by_role,
             "sample_sizes": sample_sizes,
         }
-
-    # ------------------------------------------------------------------
-    # Bootstrap Rand index
-    # ------------------------------------------------------------------
 
     def bootstrap_rand_index(
         self,
@@ -272,14 +256,12 @@ class ClusterStabilityTester:
         rand_indices: list[float] = []
 
         for _ in range(n_iter):
-            # Subsample rows with replacement
             row_idx = rng.choice(
                 n_samples,
                 size=min(n_sample, n_samples),
                 replace=True,
             )
 
-            # Pick two distinct clustering columns at random
             col_pair = rng.choice(n_clusterings, size=2, replace=False)
 
             lab_a = labels_matrix[row_idx, col_pair[0]]
@@ -306,11 +288,6 @@ class ClusterStabilityTester:
             "rand_indices": [round(float(x), 4) for x in rand_indices],
             "n_iter": len(rand_indices),
         }
-
-
-# ======================================================================
-# Result helpers
-# ======================================================================
 
 
 def _empty_chi2_result() -> dict[str, Any]:

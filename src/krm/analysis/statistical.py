@@ -14,6 +14,9 @@ from scipy.spatial.distance import pdist, squareform
 from sklearn.cluster import AgglomerativeClustering
 from sklearn.metrics import silhouette_score
 
+_DEFAULT_ALPHA = 0.05
+_DEFAULT_RANDOM_STATE = 42
+
 
 class ClusterSignificanceTester:
     """Validates clusters with bootstrap hypothesis tests.
@@ -30,10 +33,10 @@ class ClusterSignificanceTester:
         skill_vectors: np.ndarray,
         min_skill_count: int = 3,
         n_iter: int = 100,
-        alpha: float = 0.05,
+        alpha: float = _DEFAULT_ALPHA,
         n_clusters: int = 3,
-        random_state: int = 42,
-    ) -> dict:
+        random_state: int = _DEFAULT_RANDOM_STATE,
+    ) -> dict[str, float | bool | int]:
         """Test whether discovered clusters differ significantly from random.
 
         Clusters ``skill_vectors`` using AgglomerativeClustering with Jaccard
@@ -111,8 +114,8 @@ class ClusterSignificanceTester:
         skill_vectors: np.ndarray,
         max_k: int = 8,
         n_ref: int = 5,
-        random_state: int = 42,
-    ) -> list[dict]:
+        random_state: int = _DEFAULT_RANDOM_STATE,
+    ) -> list[dict[str, int | float | bool | None]]:
         """Evaluate silhouette score and gap statistic for k=2..max_k.
 
         For each k, clusters the data and computes:
@@ -142,7 +145,7 @@ class ClusterSignificanceTester:
         if n_samples < 4:
             return []
 
-        results: list[dict] = []
+        results: list[dict[str, int | float | bool | None]] = []
         rng = np.random.default_rng(random_state)
 
         best_silhouette = -1.0
@@ -239,7 +242,7 @@ class ClusterSignificanceTester:
         k: int,
         n_ref: int,
         rng: np.random.Generator,
-    ) -> dict:
+    ) -> dict[str, float | None]:
         """Compute gap statistic for the given clustering.
 
         Gap(k) = (1/B) * Σ log(W*_k) - log(W_k)
@@ -282,7 +285,7 @@ class ClusterSignificanceTester:
         }
 
     @staticmethod
-    def _empty_significance_result(n_iter: int) -> dict:
+    def _empty_significance_result(n_iter: int) -> dict[str, float | bool | int]:
         """Return a result dict indicating insufficient data for testing."""
         return {
             "silhouette_score": 0.0,

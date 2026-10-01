@@ -206,31 +206,23 @@ def breslow_day_test(contingency_tables: list[np.ndarray]) -> dict[str, Any]:
             B_coeff = -(psi_mh * (n_row1 + n_col1) + (n_col0 - n_row1))
             C_coeff = psi_mh * n_row1 * n_col1
 
-            # Quadratic formula (only the smaller root is within range)
+            # Solve A·E² + B·E + C = 0 for the root within the feasible range.
+            expected_a = n_row1 * n_col1 / n  # fallback if no valid root
             discriminant = B_coeff**2 - 4.0 * A_coeff * C_coeff
-            if discriminant < 0 or abs(A_coeff) < 1e-15:
-                expected_a = n_row1 * n_col1 / n
-            else:
+            if discriminant >= 0.0 and abs(A_coeff) >= 1e-15:
                 sqrt_disc = math.sqrt(max(discriminant, 0.0))
-                # Two roots: (-B ± sqrt_disc) / (2A)
                 root1 = (-B_coeff + sqrt_disc) / (2.0 * A_coeff)
                 root2 = (-B_coeff - sqrt_disc) / (2.0 * A_coeff)
-
-                # Pick the root in [max(0, n_row1 + n_col1 - n), min(n_row1, n_col1)]
                 lo = max(0.0, n_row1 + n_col1 - n)
                 hi = min(n_row1, n_col1)
                 if lo <= root1 <= hi:
                     expected_a = root1
                 elif lo <= root2 <= hi:
                     expected_a = root2
-                else:
-                    # Fallback to uncorrected
-                    expected_a = n_row1 * n_col1 / n
 
             # Variance: 1 / [1/E + 1/(n_row1 - E) + 1/(n_col1 - E) + 1/(n_col0 - n_row1 + E)]
             eps = 1e-12
             e_clamped = max(eps, min(expected_a, n_row1 - eps))
-            e_col1 = max(eps, min(n_col1, n_col1 - eps))
             denom_a = max(eps, n_col1 - e_clamped)
             denom_b = max(eps, n_col0 - n_row1 + e_clamped)
             var_a = 1.0 / (
@@ -245,7 +237,7 @@ def breslow_day_test(contingency_tables: list[np.ndarray]) -> dict[str, Any]:
             bd_stat += (diff**2) / var_a
 
     df = K - 1
-    p_value = 1.0 - _chi2_cdf(bd_stat, df) if df > 0 else 1.0
+    p_value = 1.0 - float(stats.chi2.cdf(bd_stat, df)) if df > 0 else 1.0
 
     return {
         "statistic": round(float(bd_stat), 4),
@@ -255,16 +247,6 @@ def breslow_day_test(contingency_tables: list[np.ndarray]) -> dict[str, Any]:
         "common_odds_ratio": round(float(psi_mh), 4),
         "n_strata": int(K),
     }
-
-
-def _chi2_cdf(x: float, df: int) -> float:
-    """Regularized lower incomplete gamma for chi-squared CDF.
-
-    Uses the series expansion: P(χ²ₖ ≤ x) = γ(k/2, x/2) / Γ(k/2).
-    """
-    if x <= 0 or df <= 0:
-        return 0.0
-    return float(stats.chi2.cdf(x, df))
 
 
 def temporal_stability_report(characteristics_df: pd.DataFrame) -> dict[str, Any]:
@@ -434,7 +416,6 @@ def cochran_mantel_haenszel_test(
         st = stats.contingency_tables.StratifiedTable(stacked)
         cmh_stat = float(st.test_null_odds.statistic)
         cmh_p = float(st.test_null_odds.pvalue)
-        log_or = float(st.log_odds_ratio_pooled)
         or_est = float(st.odds_ratio_pooled)
         or_ci = st.odds_ratio_pooled_confint()
         or_ci_low = float(or_ci[0])
@@ -472,7 +453,6 @@ def _cmh_fallback(tables: list[np.ndarray]) -> dict[str, Any]:
         n2 = c + d
         m1 = a + c
 
-        expected = n1 * m1 / n
         variance = (n1 * n2 * m1 * (n - m1)) / (n * n * (n - 1)) if n > 1 else 1.0
 
         num += a * d / n
@@ -498,7 +478,7 @@ def _cmh_fallback(tables: list[np.ndarray]) -> dict[str, Any]:
         if var_sum > 1e-15
         else 0.0
     )
-    cmh_p = 1.0 - _chi2_cdf(cmh_stat, 1)
+    cmh_p = 1.0 - float(stats.chi2.cdf(cmh_stat, 1))
 
     or_est = num / den if den > 1e-15 else 1.0
 
@@ -941,25 +921,12 @@ def validate_characteristics(
                 len(characteristics_df[characteristics_df["year"] == yr]), 1
             )
             n_absent = max(n_total - n_present, 0)
-            # Per-observation binary labels: 1.0 for present, 0.0 for absent.
             annual_prev[yr] = np.array(
                 [1.0] * n_present + [0.0] * n_absent, dtype=np.float64
             )
 
-        # Fleiss' kappa requires binary per-role labels per year.
-        # Build per-observation arrays identical to annual_prev shape.
-        annual_binary: list[np.ndarray] = []
-        for yr in years_all:
-            n_present = len(cdf[cdf["year"] == yr])
-            n_total = max(
-                len(characteristics_df[characteristics_df["year"] == yr]), 1
-            )
-            n_absent = max(n_total - n_present, 0)
-            annual_binary.append(
-                np.array(
-                    [1.0] * n_present + [0.0] * n_absent, dtype=float
-                )
-            )
+        # Fleiss' kappa uses the same per-observation binary labels.
+        annual_binary = [annual_prev[yr] for yr in years_all]
 
         # Build prevalence time series from annual means
         prevalence_series = np.array([
@@ -1094,12 +1061,10 @@ def _validate_tier2(
         ``{characteristic_id: {statistic, p_value, odds_ratio,
         is_associated, n_strata, skipped?, reason?}}``.
     """
-    _SKIP: dict[str, Any] = _SKIP_RESULT.copy()
-
     if roles_df.empty:
         results = {}
         for cid in characteristics_df["characteristic"].unique():
-            r = _SKIP.copy()
+            r = _SKIP_RESULT.copy()
             r["reason"] = "roles_df is empty"
             results[str(cid)] = r
         return results
@@ -1108,7 +1073,7 @@ def _validate_tier2(
     if not required_cols.issubset(roles_df.columns):
         results = {}
         for cid in characteristics_df["characteristic"].unique():
-            r = _SKIP.copy()
+            r = _SKIP_RESULT.copy()
             r["reason"] = (
                 f"roles_df missing columns {required_cols - set(roles_df.columns)}"
             )
@@ -1123,7 +1088,7 @@ def _validate_tier2(
 
     if len(role_ids) < 2:
         for cid in char_ids:
-            r = _SKIP.copy()
+            r = _SKIP_RESULT.copy()
             r["reason"] = f"need ≥2 roles for CMH, found {len(role_ids)}"
             results[str(cid)] = r
         return results
@@ -1168,7 +1133,7 @@ def _validate_tier2(
             usable_strata += 1
 
         if usable_strata < 2:
-            r = _SKIP.copy()
+            r = _SKIP_RESULT.copy()
             r["reason"] = (
                 f"only {usable_strata} valid strata "
                 "(need ≥2 non-degenerate 2×2 tables)"
@@ -1180,7 +1145,7 @@ def _validate_tier2(
             cmh_result = cochran_mantel_haenszel_test(stratified)
             results[str(cid)] = cmh_result
         except ValueError as exc:
-            r = _SKIP.copy()
+            r = _SKIP_RESULT.copy()
             r["reason"] = f"CMH computation failed: {exc}"
             results[str(cid)] = r
 

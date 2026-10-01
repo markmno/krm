@@ -32,6 +32,16 @@ from sklearn.cluster import AgglomerativeClustering
 from krm.lib.skill_categories import classify_skill_to_category as _classify_skill_to_category
 
 # ────────────────────────────────────────────────────────
+# Module constants
+# ────────────────────────────────────────────────────────
+
+_BOOTSTRAP_SUBSAMPLE_RATIO = 0.8
+# Stability is not bootstrapped per-sample in pairwise comparison, so a fixed
+# score is substituted.
+_PAIRWISE_FIXED_STABILITY = 0.4
+_NAME_BOOTSTRAP_SUBSAMPLE_RATIO = 0.7
+
+# ────────────────────────────────────────────────────────
 # Result types
 # ────────────────────────────────────────────────────────
 
@@ -174,9 +184,6 @@ class AxisDiscoveryEngine:
     6. Name each axis contextually from its defining skills
     """
 
-    def __init__(self) -> None:
-        pass
-
     # ── Entry point ──────────────────────────────────
 
     def discover(
@@ -221,7 +228,7 @@ class AxisDiscoveryEngine:
 
         # Accept pre-computed co-occurrence matrix directly
         cooc_matrix = skill_vectors
-        if cooc_matrix.size == 0 or len(skill_names) < min_skills_per_axis * min_k:
+        if cooc_matrix.size == 0:
             return AxisDiscoveryResult(
                 specialty="",
                 n_skills=len(skill_names),
@@ -325,9 +332,8 @@ class AxisDiscoveryEngine:
 
         for _ in range(n_bootstrap):
             # Subsample skills (80%)
-            idx_sample: list[int] = sorted(
-                rng.choice(n_skills, size=max(int(n_skills * 0.8), min_skills_per_axis * k), replace=True)
-            )
+            sample_size = max(int(n_skills * _BOOTSTRAP_SUBSAMPLE_RATIO), min_skills_per_axis * k)
+            idx_sample: list[int] = sorted(rng.choice(n_skills, size=sample_size, replace=True))
             # Deduplicate for clustering (unique indices)
             unique_idx = sorted(set(idx_sample))
             if len(unique_idx) < min_skills_per_axis * k:
@@ -405,9 +411,8 @@ class AxisDiscoveryEngine:
 
             diffs: list[float] = []
             for _ in range(n_bootstrap):
-                idx_sample = sorted(
-                    rng.choice(n_skills, size=max(int(n_skills * 0.8), 3), replace=True)
-                )
+                sample_size = max(int(n_skills * _BOOTSTRAP_SUBSAMPLE_RATIO), 3)
+                idx_sample = sorted(rng.choice(n_skills, size=sample_size, replace=True))
                 unique_idx = sorted(set(idx_sample))
                 if len(unique_idx) < min_skills_per_axis * k_b:
                     continue
@@ -429,7 +434,9 @@ class AxisDiscoveryEngine:
                     cv = _compute_coverage(axs, len(unique_idx_m))
                     sp = _compute_separation(axs)
                     ch = _compute_coherence(axs, sub_cooc_m, sub_names_m)
-                    return _compute_combined(cv, sp, 0.4, ch, k_try, len(unique_idx_m))
+                    return _compute_combined(
+                        cv, sp, _PAIRWISE_FIXED_STABILITY, ch, k_try, len(unique_idx_m)
+                    )
 
                 score_a = _eval_scheme(k_a)
                 score_b = _eval_scheme(k_b)
@@ -464,9 +471,6 @@ class SpecialtyNamingEngine:
     Tests multiple naming strategies and selects the most stable and
     distinctive one using bootstrap stability analysis.
     """
-
-    def __init__(self) -> None:
-        pass
 
     def discover_name(
         self,
@@ -548,7 +552,7 @@ class SpecialtyNamingEngine:
         original = self._generate_name(skills, strategy)
         matches = 0
         n_skills = len(skills)
-        sample_size = max(int(n_skills * 0.7), 3)
+        sample_size = max(int(n_skills * _NAME_BOOTSTRAP_SUBSAMPLE_RATIO), 3)
 
         for _ in range(n_bootstrap):
             idx = sorted(rng.choice(n_skills, size=sample_size, replace=True))
@@ -586,53 +590,6 @@ class SpecialtyNamingEngine:
 # ────────────────────────────────────────────────────────
 # Helper functions
 # ────────────────────────────────────────────────────────
-
-
-def _build_cooccurrence_matrix(
-    descriptions: list[str],
-    skill_lemmas: list[str],
-) -> tuple[list[str], np.ndarray]:
-    """Build binary skill × vacancy co-occurrence matrix.
-
-    Args:
-        descriptions: Vacancy text descriptions (one per vacancy).
-        skill_lemmas: Skill lemma names to check against descriptions.
-
-    Returns (skill_names, matrix) where matrix[i,j] = 1 if skill i
-    and skill j appear in the same vacancy.
-    """
-    if not descriptions:
-        return ([], np.array([[]]))
-
-    # For each skill, track which vacancies contain it
-    skill_to_vacancies: dict[str, set[int]] = defaultdict(set)
-    for vidx, desc in enumerate(descriptions):
-        desc_lower = desc.lower()
-        for skill in skill_lemmas:
-            if skill.lower() in desc_lower:
-                skill_to_vacancies.setdefault(skill, set()).add(vidx)
-
-    # Keep skills that appear in at least 2 vacancies
-    filtered_skills = [
-        s for s in skill_lemmas
-        if len(skill_to_vacancies.get(s, set())) >= 2
-    ]
-    if not filtered_skills:
-        return ([], np.array([[]]))
-
-    # Build co-occurrence matrix
-    n = len(filtered_skills)
-    matrix = np.zeros((n, n))
-    for i in range(n):
-        vac_i = skill_to_vacancies[filtered_skills[i]]
-        for j in range(i, n):
-            vac_j = skill_to_vacancies[filtered_skills[j]]
-            intersection = len(vac_i & vac_j)
-            if intersection > 0:
-                matrix[i, j] = intersection
-                matrix[j, i] = intersection
-
-    return filtered_skills, matrix
 
 
 def _jaccard_distance_matrix(cooc_matrix: np.ndarray) -> np.ndarray:
@@ -769,7 +726,7 @@ def _compute_combined(
 ) -> float:
     """Combined score: harmonic mean × parsimony penalty.
 
-    Harmoic mean of metrics that should be HIGH (coverage, separation,
+    Harmonic mean of metrics that should be HIGH (coverage, separation,
     stability, coherence), then penalized by log(k)/log(n).
     """
     metrics = [max(coverage, 0.001), max(separation, 0.001),

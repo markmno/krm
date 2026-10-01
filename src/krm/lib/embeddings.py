@@ -14,9 +14,13 @@ from __future__ import annotations
 import hashlib
 import pickle
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
+
+if TYPE_CHECKING:
+    from sentence_transformers import SentenceTransformer
 
 
 def build_title_characteristics(
@@ -100,17 +104,11 @@ class EmbeddingCache:
 
 
 class Embedder:
-    """Lazily-loaded sentence-transformer with caching and text enrichment.
+    """Lazily-loaded sentence-transformer wrapper with a disk cache.
 
-    Supports text-enrichment grounding: characteristic labels can be prepended
-    to title text before encoding so the E5 model integrates attribute signal
-    into token-level embeddings (analogous to STR/DEX/INT attributes on a
-    character sheet).
-
-    The ``"passage: "`` prefix signals symmetric comparison (E5 convention),
-    and preceding ``"characteristics: ...; "`` context provides semantic
-    grounding.  Characteristics are NOT concatenated post-hoc as numpy arrays;
-    they become part of the input text the model actually reads.
+    Supports text-enrichment grounding: :meth:`enrich_titles` prepends
+    characteristic labels to title text before E5 encoding, so the model
+    integrates attribute signal into token-level embeddings.
     """
 
     def __init__(
@@ -122,7 +120,7 @@ class Embedder:
         self.model_name = model_name
         self.cache = EmbeddingCache(cache_dir)
         self._device = device
-        self._model: object | None = None
+        self._model: SentenceTransformer | None = None
 
     def _resolve_device(self) -> str:
         if self._device is not None:
@@ -132,7 +130,7 @@ class Embedder:
         return "cuda" if torch.cuda.is_available() else "cpu"
 
     @property
-    def model(self) -> object:
+    def model(self) -> SentenceTransformer:
         if self._model is None:
             from sentence_transformers import SentenceTransformer
 
@@ -160,7 +158,8 @@ class Embedder:
         Args:
             titles: Raw job title strings.
             title_characteristics: Mapping from title → list of characteristic
-                label strings (e.g. ``{"Химик-аналитик": ["Экспериментальный опыт", "Анализ данных"]}``).
+                label strings, e.g.
+                ``{"Химик-аналитик": ["Экспериментальный опыт", "Анализ данных"]}``.
 
         Returns:
             Enriched text strings, one per input title, ready for E5 encoding.
@@ -196,10 +195,7 @@ class Embedder:
         Returns:
             Normalised embedding matrix of shape ``(len(texts), dim)``.
         """
-        if enriched_titles is not None:
-            prefixed = enriched_titles
-        else:
-            prefixed = list(texts)
+        prefixed = enriched_titles if enriched_titles is not None else list(texts)
 
         uncached, cached_embs, cached_idx = self.cache.batch_get(prefixed)
 
@@ -234,5 +230,5 @@ class Embedder:
     def dim(self) -> int:
         model = self.model
         if hasattr(model, "get_embedding_dimension"):
-            return model.get_embedding_dimension() or 1024
-        return model.get_sentence_embedding_dimension() or 1024
+            return model.get_embedding_dimension()
+        return model.get_sentence_embedding_dimension()

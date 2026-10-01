@@ -387,6 +387,32 @@ skill_extraction:
   max_skills_per_vacancy: 30
   embedding_model: deepvk/USER-bge-m3  # symmetric, Russian-tuned, no prefix needed
 
+# LLM-backed extraction backend (OpenAI-compatible HTTP endpoint).
+# llama-server (llama.cpp) exposes /v1/chat/completions by default.
+llm:
+  base_url: "http://localhost:8080/v1"   # llama-server default (llama.cpp)
+  model: "Qwen/Qwen3.8-27B"
+  concurrency: 16
+  temperature: 0.0
+  max_tokens: 256
+  enabled: true                          # master switch for the LLM backend
+  max_retries: 2                         # instructor create() retries on validation failure
+  response_format: "json_schema"         # structured-output mode (instructor Mode.JSON_SCHEMA)
+  cache_dir: "data/llm_cache"            # on-disk response cache for reproducibility
+  # Per-phase opt-in. Flip a phase's `use_llm` to `true` to route it through
+  # the LLM backend instead of its deterministic default.
+  phases:
+    phase_2b_skills:
+      use_llm: true      # already LLM-based (skill extraction)
+    phase_2_5_chars:
+      use_llm: false     # deterministic NLI default
+    phase_5_skill_axis:
+      use_llm: false     # deterministic NLI default
+    phase_5b_soft:
+      use_llm: false     # deterministic rubric default
+    phase_3_naming:
+      use_llm: false     # deterministic naming default
+
 # Proficiency scale (1-5)
 proficiency:
   min: 1.0

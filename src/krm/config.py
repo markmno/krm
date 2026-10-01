@@ -316,6 +316,69 @@ class Config:
     def skill_extraction_embedding_model(self) -> str:
         return self._data["skill_extraction"]["embedding_model"]
 
+    # -- LLM skill-extraction backend (OpenAI-compatible HTTP) --------------------
+
+    @property
+    def llm_base_url(self) -> str:
+        return self._data["llm"]["base_url"]
+
+    @property
+    def llm_model(self) -> str:
+        return self._data["llm"]["model"]
+
+    @property
+    def llm_concurrency(self) -> int:
+        return self._data["llm"].get("concurrency", 16)
+
+    @property
+    def llm_temperature(self) -> float:
+        return self._data["llm"].get("temperature", 0.0)
+
+    @property
+    def llm_max_tokens(self) -> int:
+        return self._data["llm"].get("max_tokens", 256)
+
+    @property
+    def llm_enabled(self) -> bool:
+        return self._data.get("llm", {}).get("enabled", True)
+
+    @property
+    def llm_max_retries(self) -> int:
+        return self._data.get("llm", {}).get("max_retries", 2)
+
+    @property
+    def llm_response_format(self) -> str:
+        return self._data.get("llm", {}).get("response_format", "json_schema")
+
+    @property
+    def llm_cache_dir(self) -> str:
+        return self._data.get("llm", {}).get("cache_dir", "data/llm_cache")
+
+    @property
+    def use_llm_phase_2b(self) -> bool:
+        phases = self._data.get("llm", {}).get("phases", {})
+        return phases.get("phase_2b_skills", {}).get("use_llm", False)
+
+    @property
+    def use_llm_phase_2_5(self) -> bool:
+        phases = self._data.get("llm", {}).get("phases", {})
+        return phases.get("phase_2_5_chars", {}).get("use_llm", False)
+
+    @property
+    def use_llm_phase_5(self) -> bool:
+        phases = self._data.get("llm", {}).get("phases", {})
+        return phases.get("phase_5_skill_axis", {}).get("use_llm", False)
+
+    @property
+    def use_llm_phase_5b(self) -> bool:
+        phases = self._data.get("llm", {}).get("phases", {})
+        return phases.get("phase_5b_soft", {}).get("use_llm", False)
+
+    @property
+    def use_llm_phase_3(self) -> bool:
+        phases = self._data.get("llm", {}).get("phases", {})
+        return phases.get("phase_3_naming", {}).get("use_llm", False)
+
     # -- Characteristics (unified — Phase 2.5 + Phase 5) -------------------------
 
     @property

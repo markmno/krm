@@ -301,7 +301,7 @@ def build_models(config: Config) -> list[dict[str, Any]]:
     roles_df = read_parquet(config.roles_path)
     characteristic_scores_df = read_parquet(config.characteristic_scores_path)
 
-    roles_clean = roles_df[roles_df["noise_flag"] != True]  # noqa: E712
+    roles_clean = roles_df[~roles_df["noise_flag"]]
 
     if len(roles_clean) == 0:
         print("[Phase 6] No non-noise roles — nothing to model")

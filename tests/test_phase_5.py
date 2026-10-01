@@ -10,6 +10,7 @@ import pytest
 
 from krm import phase_5_axes
 from krm.config import Config
+from krm.lib.llm import LLMClient
 
 _CONTENT_AXES = [
     "domain_knowledge",
@@ -188,3 +189,98 @@ class TestMapToCharacteristics:
         matrix = pd.read_parquet(fake_config.skill_characteristic_scores_path)
         assert matrix.empty
         assert list(matrix.columns) == _MATRIX_COLUMNS
+
+
+def _skills_with_untagged() -> pd.DataFrame:
+    """Two glossary skills + two out-of-glossary skills for LLM backfill."""
+    return pd.DataFrame({
+        "role_id": [0, 0, 0, 1],
+        "skill_canonical_name": ["experiment", "llm_tagged", "llm_missing", "data"],
+        "tfidf_weight": [0.9, 0.8, 0.7, 0.6],
+    })
+
+
+class TestLLMPhase5:
+    """LLM backfill of glossary-untagged skills (no network, run_many stubbed)."""
+
+    @pytest.fixture
+    def llm_config(self, fake_config, tmp_path, monkeypatch) -> Config:
+        monkeypatch.setattr(Config, "use_llm_phase_5", property(lambda self: True))
+        monkeypatch.setattr(
+            Config, "llm_cache_dir", property(lambda self: str(tmp_path / "llm_cache"))
+        )
+        return fake_config
+
+    def test_llm_tags_only_out_of_glossary_skills(self, llm_config, monkeypatch):
+        sent: list[str] = []
+
+        async def fake_run_many(self, prompts, schema):
+            assert schema is phase_5_axes.AxisTagResponse
+            sent.extend(p.user for p in prompts)
+            return [
+                phase_5_axes.AxisTagResponse(axis="data_analysis")
+                if "llm_tagged" in p.user
+                else None
+                for p in prompts
+            ]
+
+        monkeypatch.setattr(LLMClient, "run_many", fake_run_many)
+        _skills_with_untagged().to_parquet(
+            llm_config.output_dir / "skills_per_role.parquet", index=False
+        )
+
+        phase_5_axes.map_to_characteristics(llm_config)
+
+        # (a) only out-of-glossary skills are sent to the LLM.
+        sent_skills = [u.removeprefix("Навык: ") for u in sent]
+        assert set(sent_skills) == {"llm_tagged", "llm_missing"}
+
+        # (b) LLM tags merge into the matrix (tag=1, cosine=0 → 0.7).
+        matrix = pd.read_parquet(llm_config.skill_characteristic_scores_path)
+        tagged = matrix[
+            matrix["skill_canonical_name"] == "llm_tagged"
+        ].set_index("characteristic_id")
+        assert tagged.loc["data_analysis", "nli_score"] == pytest.approx(0.7, abs=1e-6)
+
+        # (c) None → left untagged (deterministic all-zero score).
+        missing = matrix[
+            matrix["skill_canonical_name"] == "llm_missing"
+        ].set_index("characteristic_id")
+        assert (missing["nli_score"] == 0.0).all()
+
+    def test_llm_does_not_retag_glossary_skills(self, llm_config, monkeypatch):
+        sent: list[str] = []
+
+        async def fake_run_many(self, prompts, schema):
+            sent.extend(p.user for p in prompts)
+            return [phase_5_axes.AxisTagResponse(axis="management") for _ in prompts]
+
+        monkeypatch.setattr(LLMClient, "run_many", fake_run_many)
+        _skills_with_untagged().to_parquet(
+            llm_config.output_dir / "skills_per_role.parquet", index=False
+        )
+
+        phase_5_axes.map_to_characteristics(llm_config)
+
+        # Glossary skills are never sent; their deterministic tag is preserved.
+        assert "experiment" not in sent and "data" not in sent
+        matrix = pd.read_parquet(llm_config.skill_characteristic_scores_path)
+        exp = matrix[
+            matrix["skill_canonical_name"] == "experiment"
+        ].set_index("characteristic_id")
+        # experiment → tag 1.0 on experimental, cosine 1.0 → 0.7 + 0.3.
+        assert exp.loc["experimental", "nli_score"] == pytest.approx(1.0, abs=1e-6)
+
+    def test_llm_disabled_is_deterministic(self, fake_config):
+        """Default config (use_llm_phase_5 False) never touches the LLM."""
+        _skills_with_untagged().to_parquet(
+            fake_config.output_dir / "skills_per_role.parquet", index=False
+        )
+
+        phase_5_axes.map_to_characteristics(fake_config)
+
+        matrix = pd.read_parquet(fake_config.skill_characteristic_scores_path)
+        tagged = matrix[
+            matrix["skill_canonical_name"] == "llm_tagged"
+        ].set_index("characteristic_id")
+        assert (tagged["nli_score"] == 0.0).all()

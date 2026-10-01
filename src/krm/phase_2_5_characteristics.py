@@ -55,14 +55,18 @@ Output schema
 
 from __future__ import annotations
 
+import asyncio
 import re
+from contextlib import suppress
 from typing import Any
 
 import pandas as pd
+from pydantic import BaseModel, field_validator
 from tqdm import tqdm
 
 from krm.config import Config
 from krm.lib.io import get_connection, read_parquet, write_parquet
+from krm.lib.llm import LLMPrompt, build_llm
 
 # ---------------------------------------------------------------------------
 # Regex-based experience extraction
@@ -115,10 +119,8 @@ def extract_experience(description: str, patterns: list[str]) -> float | None:
         # Check if there is a second numeric group (range).
         second_val: float | None = None
         if len(groups) >= 2 and groups[1] and groups[1].isdigit():
-            try:
+            with suppress(ValueError, TypeError):
                 second_val = float(groups[1])
-            except (ValueError, TypeError):
-                pass
 
         if second_val is not None:
             return (first_val + second_val) / 2.0
@@ -154,17 +156,95 @@ def _build_characteristic_classifier(config: Config) -> Any:
     )
 
 
+# ---------------------------------------------------------------------------
+# LLM structured-output schema and prompt building
+# ---------------------------------------------------------------------------
+
+_LLM_SYSTEM_PROMPT = (
+    "Ты — эксперт по анализу вакансий в научной и инженерной сфере. Оцени, "
+    "насколько каждая из перечисленных ниже характеристик выражена в описании "
+    "вакансии. Верни строго JSON со списком оценок: для каждой характеристики "
+    "укажи её идентификатор (characteristic_id) и уверенность (confidence) в "
+    "диапазоне от 0.0 до 1.0, где 0 означает полное отсутствие характеристики, "
+    "а 1 — что она является явным центральным требованием. Используй только "
+    "идентификаторы из списка."
+)
+
+
+class CharacteristicScore(BaseModel):
+    """A single characteristic confidence score produced by the LLM."""
+
+    characteristic_id: str
+    confidence: float
+
+    @field_validator("confidence")
+    @classmethod
+    def _clamp_confidence(cls, value: float) -> float:
+        """Clamp the self-assessed confidence into [0, 1]."""
+        return min(max(value, 0.0), 1.0)
+
+
+class CharacteristicScoresResponse(BaseModel):
+    """LLM structured output: confidence per characteristic for one vacancy.
+
+    Entries whose ``characteristic_id`` is not a configured hypothesis are
+    ignored by the caller — the allow-list lives in config, not in the schema,
+    so it is enforced at the dispatch boundary in
+    :func:`_extract_characteristics_llm`.
+    """
+
+    characteristics: list[CharacteristicScore]
+
+
+def _build_characteristic_prompt(
+    hypotheses: dict[str, str],
+    labels_ru: dict[str, str],
+    description: str,
+) -> LLMPrompt:
+    """Build one LLM prompt listing all characteristic hypotheses as the schema.
+
+    Args:
+        hypotheses: Mapping ``characteristic_id → hypothesis`` from config.
+        labels_ru: Mapping ``characteristic_id → Russian label`` from config.
+        description: The (sanitised, non-empty) vacancy description.
+
+    Returns:
+        A single :class:`LLMPrompt` whose user payload lists the 7 hypotheses
+        and asks for a confidence score per characteristic.
+    """
+    definitions = "\n".join(
+        f"- {cid} ({labels_ru[cid]}): {text}" for cid, text in hypotheses.items()
+    )
+    user = (
+        "Описание вакансии:\n"
+        '"""\n'
+        f"{description}\n"
+        '"""\n\n'
+        "Характеристики для оценки:\n"
+        f"{definitions}\n\n"
+        "Оцени каждую характеристику по шкале 0–1 и верни JSON со списком оценок."
+    )
+    return LLMPrompt(system=_LLM_SYSTEM_PROMPT, user=user)
+
+
 def extract_characteristics(
     config: Config,
     descriptions: list[str],
     vacancy_ids: list[str],
 ) -> pd.DataFrame:
-    """Score each vacancy against all characteristic hypotheses using zero-shot NLI.
+    """Score each vacancy against all characteristic hypotheses.
 
-    Loads the NLI model (lazy import), processes descriptions in batches
-    to avoid OOM, and emits one row per vacancy–characteristic pair
-    where the entailment confidence meets or exceeds
-    ``config.characteristics_confidence_threshold``.
+    Dispatches on ``config.use_llm_phase_2_5``:
+
+    * ``False`` (default) — zero-shot NLI (bart-large-mnli): each vacancy is
+      scored against every hypothesis in a single entailment pass.
+    * ``True`` — one LLM call per vacancy over the shared :class:`LLMClient`,
+      returning a confidence per characteristic. A vacancy whose LLM call
+      totally fails (``None``) gracefully degrades to the NLI result for that
+      vacancy only (per-item fallback, never a batch abort).
+
+    Both paths emit one row per vacancy–characteristic pair whose confidence
+    meets or exceeds ``config.characteristics_confidence_threshold``.
 
     Args:
         config: Pipeline configuration (model, hypotheses, thresholds).
@@ -181,16 +261,35 @@ def extract_characteristics(
     """
     hypotheses: dict[str, str] = config.characteristic_hypotheses
     labels_ru: dict[str, str] = config.characteristic_labels_ru
-    hypothesis_to_id: dict[str, str] = {text: cid for cid, text in hypotheses.items()}
-    hypothesis_to_label: dict[str, str] = {
-        text: labels_ru[cid] for cid, text in hypotheses.items()
-    }
-    hypothesis_texts: list[str] = list(hypotheses.values())
 
     # Sanitise descriptions: convert None/NaN to empty string.
     sanitised: list[str] = [
         d if isinstance(d, str) and d else "" for d in descriptions
     ]
+
+    if config.use_llm_phase_2_5:
+        return _extract_characteristics_llm(
+            config, sanitised, vacancy_ids, hypotheses, labels_ru
+        )
+
+    return _extract_characteristics_nli(
+        config, sanitised, vacancy_ids, hypotheses, labels_ru
+    )
+
+
+def _extract_characteristics_nli(
+    config: Config,
+    sanitised: list[str],
+    vacancy_ids: list[str],
+    hypotheses: dict[str, str],
+    labels_ru: dict[str, str],
+) -> pd.DataFrame:
+    """Score vacancies against hypotheses via zero-shot NLI (deterministic)."""
+    hypothesis_texts: list[str] = list(hypotheses.values())
+    hypothesis_to_id: dict[str, str] = {text: cid for cid, text in hypotheses.items()}
+    hypothesis_to_label: dict[str, str] = {
+        text: labels_ru[cid] for cid, text in hypotheses.items()
+    }
 
     threshold: float = config.characteristics_confidence_threshold
     batch_size: int = config.characteristics_batch_size
@@ -234,7 +333,7 @@ def extract_characteristics(
             global_idx = non_empty_indices[j]
             vacancy_id = vacancy_ids[global_idx]
 
-            for label, score in zip(result["labels"], result["scores"]):
+            for label, score in zip(result["labels"], result["scores"], strict=False):
                 if score >= threshold:
                     all_rows.append({
                         "vacancy_id": vacancy_id,
@@ -245,17 +344,92 @@ def extract_characteristics(
 
     # ---- Build output DataFrame ---------------------------------------------
     if not all_rows:
-        return pd.DataFrame(
-            columns=["vacancy_id", "characteristic_id", "characteristic_label", "confidence"]
-        )
+        return _empty_characteristics_df()
 
-    result_df = pd.DataFrame(all_rows)
-    return result_df
+    return pd.DataFrame(all_rows)
+
+
+def _extract_characteristics_llm(
+    config: Config,
+    sanitised: list[str],
+    vacancy_ids: list[str],
+    hypotheses: dict[str, str],
+    labels_ru: dict[str, str],
+) -> pd.DataFrame:
+    """Score vacancies via one LLM call per vacancy, falling back to NLI per item."""
+    threshold: float = config.characteristics_confidence_threshold
+
+    # One prompt per non-empty vacancy. Empty descriptions produce no rows
+    # (matching the NLI path) and are never sent to the model.
+    prompts: list[LLMPrompt] = []
+    prompt_indices: list[int] = []
+    for idx, text in enumerate(sanitised):
+        if not text:
+            continue
+        prompts.append(_build_characteristic_prompt(hypotheses, labels_ru, text))
+        prompt_indices.append(idx)
+
+    if not prompts:
+        return _empty_characteristics_df()
+
+    client = build_llm(config)
+    print(
+        f"[Phase 2.5] Scoring {len(prompts)} vacancies via LLM ({config.llm_model})"
+    )
+    results: list[CharacteristicScoresResponse | None] = asyncio.run(
+        client.run_many(prompts, CharacteristicScoresResponse)
+    )
+
+    all_rows: list[dict[str, Any]] = []
+    fallback_indices: list[int] = []
+
+    for idx, result in zip(prompt_indices, results, strict=True):
+        if result is None:
+            # Total failure for this vacancy → per-item graceful degradation.
+            fallback_indices.append(idx)
+            continue
+
+        for score in result.characteristics:
+            cid = score.characteristic_id
+            if cid not in hypotheses:
+                continue  # unknown characteristic_id — ignore
+            if score.confidence < threshold:
+                continue
+            all_rows.append({
+                "vacancy_id": vacancy_ids[idx],
+                "characteristic_id": cid,
+                "characteristic_label": labels_ru[cid],
+                "confidence": score.confidence,
+            })
+
+    if fallback_indices:
+        fallback_descriptions = [sanitised[i] for i in fallback_indices]
+        fallback_vacancy_ids = [vacancy_ids[i] for i in fallback_indices]
+        fallback_df = _extract_characteristics_nli(
+            config, fallback_descriptions, fallback_vacancy_ids, hypotheses, labels_ru
+        )
+        if not fallback_df.empty:
+            all_rows.extend(fallback_df.to_dict("records"))
+
+    if not all_rows:
+        return _empty_characteristics_df()
+
+    return pd.DataFrame(all_rows)
+
+
+def _empty_characteristics_df() -> pd.DataFrame:
+    """Return an empty DataFrame with the characteristic output schema."""
+    return pd.DataFrame(
+        columns=["vacancy_id", "characteristic_id", "characteristic_label", "confidence"]
+    )
 
 
 # ---------------------------------------------------------------------------
 # Main pipeline entry point
 # ---------------------------------------------------------------------------
+
+
+_MAX_TITLE_CHARS = 100
 
 
 def _extract_title(
@@ -280,12 +454,9 @@ def _extract_title(
 
     if isinstance(description, str) and description.strip():
         text = description.strip()
-        if len(text) > 100:
-            break_idx = text.rfind(" ", 0, 100)
-            if break_idx > 0:
-                text = text[:break_idx]
-            else:
-                text = text[:100]
+        if len(text) > _MAX_TITLE_CHARS:
+            break_idx = text.rfind(" ", 0, _MAX_TITLE_CHARS)
+            text = text[:break_idx] if break_idx > 0 else text[:_MAX_TITLE_CHARS]
         return text
 
     return ""
@@ -419,7 +590,7 @@ def run_pipeline(config: Config) -> tuple[pd.DataFrame, dict[str, list[str]]]:
     experience_series = pd.Series(experience_map, name="experience_years")
     print(
         f"[Phase 2.5] Experience extracted for "
-        f"{experience_map.__len__()}/{len(vacancy_ids)} vacancies"
+        f"{len(experience_map)}/{len(vacancy_ids)} vacancies"
     )
 
     # ------------------------------------------------------------------

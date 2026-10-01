@@ -53,7 +53,6 @@ _EXPERIENCE_NAMES: dict[str, str] = {
 
 
 def _strip_html(text: str | None) -> str | None:
-    """Strip HTML tags and collapse whitespace."""
     if not text:
         return None
     return BeautifulSoup(text, "lxml").get_text(separator=" ", strip=True) or None

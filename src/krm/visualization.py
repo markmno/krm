@@ -48,7 +48,6 @@ class CareerLevel(TypedDict):
 # ---------------------------------------------------------------------------
 
 _PRIMARY = "#2C5F8A"  # deep steel blue — fill & line
-_ACCENT = "#F4A261"  # warm amber — markers / highlights (reserved)
 _GRID = "#C7D2DA"
 _MUTED = "#6B7280"
 _TEXT = "#1F2937"
@@ -188,6 +187,19 @@ def _annotate_spoke(
         )
 
 
+def _setup_polar_axes(ax: PolarAxes) -> None:
+    """Apply the shared radar layout: clockwise, radial grid 1–5, muted spines."""
+    ax.set_theta_offset(np.pi / 2)
+    ax.set_theta_direction(-1)
+    ax.set_yticks([1, 2, 3, 4, 5])
+    ax.set_yticklabels(["1", "2", "3", "4", "5"], fontsize=8, color=_MUTED)
+    ax.set_ylim(0, _PROFICIENCY_MAX)
+    ax.set_xticks([])
+    ax.grid(True, color=_GRID, linewidth=0.8, alpha=0.9)
+    ax.spines["polar"].set_color(_MUTED)
+    ax.spines["polar"].set_linewidth(0.8)
+
+
 def _draw_spider(
     ax: PolarAxes,
     model: dict[str, Any],
@@ -212,15 +224,7 @@ def _draw_spider(
     values_closed = values + [values[0]]
     angles_closed = angles.tolist() + [angles[0]]
 
-    ax.set_theta_offset(np.pi / 2)
-    ax.set_theta_direction(-1)
-    ax.set_yticks([1, 2, 3, 4, 5])
-    ax.set_yticklabels(["1", "2", "3", "4", "5"], fontsize=8, color=_MUTED)
-    ax.set_ylim(0, _PROFICIENCY_MAX)
-    ax.set_xticks([])
-    ax.grid(True, color=_GRID, linewidth=0.8, alpha=0.9)
-    ax.spines["polar"].set_color(_MUTED)
-    ax.spines["polar"].set_linewidth(0.8)
+    _setup_polar_axes(ax)
 
     ax.plot(
         angles_closed, values_closed, linewidth=2.4, color=_PRIMARY,
@@ -618,15 +622,7 @@ def render_comparison(
 
     fig = plt.figure(figsize=(8.0, 7.6), dpi=dpi)
     ax = cast(PolarAxes, fig.add_subplot(111, projection="polar"))
-    ax.set_theta_offset(np.pi / 2)
-    ax.set_theta_direction(-1)
-    ax.set_yticks([1, 2, 3, 4, 5])
-    ax.set_yticklabels(["1", "2", "3", "4", "5"], fontsize=8, color=_MUTED)
-    ax.set_ylim(0, _PROFICIENCY_MAX)
-    ax.set_xticks([])
-    ax.grid(True, color=_GRID, linewidth=0.8, alpha=0.9)
-    ax.spines["polar"].set_color(_MUTED)
-    ax.spines["polar"].set_linewidth(0.8)
+    _setup_polar_axes(ax)
 
     for i, model in enumerate(models):
         values = [c["proficiency"] for c in _ordered_characteristics(model, characteristic_order)]
@@ -685,133 +681,6 @@ def render_summary(
     ax.set_xlabel("Навыков", fontsize=9)
     ax.set_title("Навыков по ролям", fontsize=11, fontweight="bold")
     ax.grid(True, axis="x", color=_GRID, linewidth=0.7, alpha=0.7)
-    for spine in ("top", "right"):
-        ax.spines[spine].set_visible(False)
-
-    fig.tight_layout()
-    output = Path(output_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, dpi=dpi, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    return output
-
-
-# ---------------------------------------------------------------------------
-# Role transition map & leadership gap
-# ---------------------------------------------------------------------------
-
-
-def render_transition_map(
-    roles: list[dict[str, Any]],
-    transitions: list[dict[str, Any]],
-    axis_labels: dict[str, str],
-    output_path: Path | str,
-    *,
-    leadership_label: str = "Руководитель лаборатории",
-    leadership_edges: list[dict[str, Any]] | None = None,
-    dpi: int = 300,
-) -> Path:
-    """Render the role→role transition map as a network graph.
-
-    Roles sit on a circle; leadership (a pseudo-node, not a base role) sits at
-    the centre. An edge connects two roles when they share exactly one dominant
-    competence (a "pivot"); the edge is labelled with that shared competence.
-    Dashed amber edges point from every role toward leadership.
-    """
-    _apply_rc()
-    n = len(roles)
-    angles = np.linspace(90.0, 90.0 + 360.0, n, endpoint=False)
-    pos: dict[int, tuple[float, float]] = {}
-    for i, deg in enumerate(angles):
-        a = np.deg2rad(deg)
-        pos[i] = (np.cos(a), np.sin(a))
-    center = (0.0, 0.0)
-
-    fig, ax = plt.subplots(figsize=(11.5, 9.4), dpi=dpi)
-    ax.set_aspect("equal")
-    ax.axis("off")
-
-    # Undirected role→role edges, labelled with the shared competence.
-    drawn: set[tuple[int, int]] = set()
-    for e in transitions:
-        key = tuple(sorted((e["source"], e["target"])))
-        if key in drawn:
-            continue
-        drawn.add(key)
-        x0, y0 = pos[e["source"]]
-        x1, y1 = pos[e["target"]]
-        ax.plot([x0, x1], [y0, y1], color="#9AA5B1", linewidth=1.4, zorder=1)
-        mx, my = (x0 + x1) / 2, (y0 + y1) / 2
-        shared = axis_labels.get(e["shared_axis"], e["shared_axis"] or "")
-        ax.text(
-            mx, my, shared, ha="center", va="center", fontsize=7.2,
-            color=_MUTED, zorder=2,
-            bbox={"facecolor": "white", "edgecolor": "none", "pad": 1.6},
-        )
-
-    # Leadership edges (every role → centre).
-    for e in (leadership_edges or []):
-        x0, y0 = pos[e["source"]]
-        ax.plot([x0, center[0]], [y0, center[1]], color=_ACCENT,
-                linewidth=1.3, linestyle="--", alpha=0.75, zorder=1)
-
-    # Role nodes + outward labels.
-    for i in range(n):
-        x, y = pos[i]
-        ax.scatter([x], [y], s=1500, color=_PRIMARY, zorder=3)
-        deg = angles[i]
-        a = np.deg2rad(deg)
-        cos, sin = np.cos(a), np.sin(a)
-        lx, ly = 1.42 * cos, 1.42 * sin
-        ha = "center" if abs(cos) < 0.32 else ("left" if cos > 0 else "right")
-        va = "center" if abs(sin) < 0.32 else ("bottom" if sin > 0 else "top")
-        ax.text(lx, ly, roles[i]["label"], ha=ha, va=va, fontsize=9.8,
-                fontweight="bold", color=_TEXT, zorder=4)
-
-    # Leadership centre node.
-    ax.scatter([center[0]], [center[1]], s=2400, color=_ACCENT, zorder=3)
-    ax.text(center[0], center[1] - 0.24, leadership_label, ha="center",
-            va="top", fontsize=10.5, fontweight="bold", color="#8A5A00", zorder=4)
-
-    ax.set_xlim(-2.15, 2.15)
-    ax.set_ylim(-1.95, 1.95)
-    ax.set_title("Карта перехода между ролями", fontsize=13,
-                 fontweight="bold", pad=14)
-
-    output = Path(output_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output, dpi=dpi, bbox_inches="tight", facecolor="white")
-    plt.close(fig)
-    return output
-
-
-def render_leadership_gap(
-    roles: list[dict[str, Any]],
-    leadership_edges: list[dict[str, Any]],
-    axis_labels: dict[str, str],
-    output_path: Path | str,
-    *,
-    dpi: int = 300,
-) -> Path:
-    """Render the gap to leadership (management + domain) per role."""
-    _apply_rc()
-    labels = [r["label"] for r in roles]
-    mgmt = [e["gap"].get("management", 0.0) for e in leadership_edges]
-    dom = [e["gap"].get("domain_knowledge", 0.0) for e in leadership_edges]
-    y = np.arange(len(labels))[::-1]
-
-    fig, ax = plt.subplots(figsize=(8.8, 4.6), dpi=dpi)
-    ax.barh(y + 0.2, mgmt, height=0.36, color=_PRIMARY,
-            label=axis_labels.get("management", "management"))
-    ax.barh(y - 0.2, dom, height=0.36, color=_ACCENT,
-            label=axis_labels.get("domain_knowledge", "domain_knowledge"))
-    ax.set_yticks(y)
-    ax.set_yticklabels(labels, fontsize=8.6)
-    ax.set_xlabel("Разрыв (Δ) до уровня руководителя", fontsize=9)
-    ax.set_title("Путь в руководство: что нужно дорастить",
-                 fontsize=11, fontweight="bold", pad=10)
-    ax.grid(True, axis="x", color=_GRID, linewidth=0.7, alpha=0.7)
-    ax.legend(fontsize=8.5, loc="lower right", frameon=False)
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
 

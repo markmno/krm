@@ -202,7 +202,6 @@ def cmd_validate(config_path: str | None = None) -> None:
 def cmd_report(config_path: str | None = None) -> None:
     """Phase 8: Generate the self-contained HTML report from real pipeline data."""
     import subprocess
-    import sys
 
     root = Path(__file__).parent.parent.parent
     cmd = [sys.executable, "-m", "scripts.generate_report"]
@@ -229,7 +228,7 @@ def cmd_all(config_path: str | None = None) -> None:
         ("Phase 7: Validate", cmd_validate),
         ("Phase 8: Generate HTML report", cmd_report),
     ]
-    for i, (label, fn) in enumerate(steps, 1):
+    for _i, (label, fn) in enumerate(steps, 1):
         print(f"\n{'='*60}")
         print(f"  {label}")
         print(f"{'='*60}")
@@ -423,11 +422,9 @@ def cmd_trudvsem_collect(config_path: str | None = None) -> None:
         python -m krm.cli trudvsem-collect           # full collection
         python -m krm.cli trudvsem-collect --dry-run  # census only
     """
-    import json
-    import sys
     from datetime import datetime, timezone
 
-    from krm.lib.io import get_connection, init_tables, upsert_raw_vacancy
+    from krm.lib.io import get_connection, init_tables
     from krm.phase0.collectors.trudvsem import (
         MAX_OFFSET,
         TrudvsemCollector,
@@ -542,7 +539,6 @@ def _collect_keyword_full(
     collector: Any, conn: Any, run_id: str, keyword: str
 ) -> int:
     """Collect all available results for a single keyword."""
-    from krm.phase0.collectors.trudvsem import MAX_OFFSET
     from krm.lib.io import upsert_raw_vacancy
 
     vacancies = collector.collect_all(text=keyword)
@@ -709,15 +705,11 @@ def cmd_trudvsem_region_scan(config_path: str | None = None) -> None:
         python -m krm.cli trudvsem-region-scan --regions=77,78,50  # specific regions
         python -m krm.cli trudvsem-region-scan --dry-run
     """
-    import json
-    import sys
     from datetime import datetime, timezone
 
     from krm.lib.io import get_connection, init_tables, upsert_raw_vacancy
     from krm.phase0.collectors.trudvsem import (
         MAX_OFFSET,
-        FIRST_PAGE_LIMIT,
-        NEXT_PAGE_LIMIT,
         TrudvsemCollector,
     )
 

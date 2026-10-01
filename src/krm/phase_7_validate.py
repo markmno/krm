@@ -30,6 +30,9 @@ import pandas as pd
 from krm.config import Config
 from krm.lib.io import read_parquet
 
+EXPECTED_CHARACTERISTICS = 7
+EXPECTED_SOFT_AXES = 4
+
 
 def _safe_read(path: Path, label: str) -> pd.DataFrame | None:
     if not path.exists():
@@ -64,7 +67,7 @@ def _validate_phase_3_roles(config: Config) -> dict[str, Any]:
         return {"status": "skipped", "reason": "roles.parquet not found"}
 
     if "centroid_embedding" not in df.columns or len(df) < 2:
-        return {"total_roles": len(df) if df is not None else 0, "error": "too few roles for clustering metrics"}
+        return {"total_roles": len(df), "error": "too few roles for clustering metrics"}
 
     centroids = np.stack([np.frombuffer(r, dtype=np.float32) for r in df["centroid_embedding"].dropna()])
     if len(centroids) < 2:
@@ -196,16 +199,14 @@ def _validate_integration(config: Config) -> dict[str, Any]:
 
     if characteristics is not None and "role_id" in characteristics.columns:
         result["roles_with_characteristic_scores"] = int(characteristics["role_id"].nunique())
-        expected_characteristics = 7
         characteristic_coverage = {
             rid: int(grp["characteristic_id"].nunique())
             for rid, grp in characteristics.groupby("role_id")
         }
         result["roles_with_complete_characteristics"] = sum(
-            1 for v in characteristic_coverage.values() if v == expected_characteristics
+            1 for v in characteristic_coverage.values() if v == EXPECTED_CHARACTERISTICS
         )
 
-    expected_soft_axes = 4
     if soft is not None and "role_id" in soft.columns and "soft_id" in soft.columns:
         result["roles_with_soft_scores"] = int(soft["role_id"].nunique())
         soft_coverage = {
@@ -213,7 +214,7 @@ def _validate_integration(config: Config) -> dict[str, Any]:
             for rid, grp in soft.groupby("role_id")
         }
         result["roles_with_complete_soft_scores"] = sum(
-            1 for v in soft_coverage.values() if v == expected_soft_axes
+            1 for v in soft_coverage.values() if v == EXPECTED_SOFT_AXES
         )
     else:
         result["roles_with_soft_scores"] = 0
@@ -226,7 +227,7 @@ def validate(config: Config) -> dict[str, Any]:
     config.data_dir.mkdir(parents=True, exist_ok=True)
     config.reports_dir.mkdir(parents=True, exist_ok=True)
 
-    report = {
+    report: dict[str, Any] = {
         "pipeline": "KRM",
         "version": "0.2.0",
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -240,10 +241,7 @@ def validate(config: Config) -> dict[str, Any]:
         },
     }
 
-    metrics = {
-        k: v for k, v in report["phases"].items() if k != "integration"
-    }
-    metrics["integration"] = report["phases"]["integration"]
+    metrics = dict(report["phases"])
 
     metrics_path = config.reports_dir / "metrics.json"
     metrics_path.write_text(json.dumps(metrics, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
@@ -259,11 +257,11 @@ def validate(config: Config) -> dict[str, Any]:
 
 def _build_markdown_report(report: dict[str, Any]) -> str:
     lines = [
-        f"# KRM Validation Report",
-        f"",
+        "# KRM Validation Report",
+        "",
         f"**Pipeline:** {report['pipeline']} v{report['version']}",
         f"**Timestamp:** {report['timestamp']}",
-        f"",
+        "",
         "---",
         "",
     ]

@@ -74,7 +74,6 @@ def _assign_vacancies_to_roles(
     centroid_ids = np.array([c[0] for c in centroids], dtype=np.int64)
     centroid_matrix = np.stack([c[1] for c in centroids])  # (n_roles, dim)
 
-    # Embed unique job titles.
     unique_titles = sorted(classified_df["title"].dropna().unique().tolist())
     title_embs = embedder.encode(unique_titles)  # L2-normalised
 
@@ -201,7 +200,6 @@ def extract_skills(config: Config) -> pd.DataFrame:
     write_parquet(vacancy_roles, config.vacancy_roles_path)
     logger.info(f"[Phase 4] Wrote {len(vacancy_roles)} vacancy→role mappings")
 
-    # Ensure Phase 2b vacancy-level skills exist.
     extracted_path = config.output_dir / "extracted_skills.parquet"
     if not extracted_path.exists():
         from krm.phase_2b_extract_skills import extract_skills as extract_skills_2b

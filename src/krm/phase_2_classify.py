@@ -1,54 +1,8 @@
 """Phase 2: STEM/IT/Non-STEM classification for Russian vacancy text.
 
-Four-tier classifier designed to distinguish genuine STEM research positions
-from IT roles that appear alongside STEM keywords on the HH.ru platform.
-
-**Classification tiers:**
-
-1. **API professional_role filter** — vacancies whose HH.ru
-   professional_role ID belongs to {96, 123, 124, 125, 126} are
-   classified as PURE_IT immediately.
-
-2. **Keyword triage** — vacancies whose title matches
-   ``[Pp]rogramm``/``[Rr]азработчик`` and whose description contains
-   *no* STEM keywords (лаборатор, эксперимент, исследовани, научн,
-   анализ, синтез, моделирован) are classified as PURE_IT.
-
-3. **Zero-shot NLI** — remaining vacancies are scored with
-   ``facebook/bart-large-mnli`` against three hypotheses:
-   *scientific research position requiring experimental work*,
-   *software engineering or IT development role*, and
-   *administrative or teaching position*.
-
-4. **Interdisciplinary catch** — if both STEM and IT entailment scores
-   exceed ``interdisciplinary_threshold``, the vacancy is classified
-   as INTERDISCIPLINARY. Otherwise the highest-scoring hypothesis
-   determines the category: STEM_RESEARCH, PURE_IT, or NON_STEM.
-
-**Output schema** (columns in ``classified.parquet``):
-
-.. list-table::
-   :header-rows: 1
-
-   * - Column
-     - Type
-     - Description
-   * - ``vacancy_id``
-     - str
-     - HH.ru vacancy identifier.
-   * - ``title``
-     - str
-     - Vacancy title from ``data.name``.
-   * - ``description``
-     - str (nullable)
-     - Full vacancy description from ``data.description``.
-   * - ``stem_category``
-     - str
-     - One of STEM_RESEARCH, PURE_IT, NON_STEM, INTERDISCIPLINARY.
-   * - ``nli_scores_json``
-     - str (nullable)
-     - JSON-encoded entailment scores (null for Tier-1/2 decisions).
-
+Four-tier classifier that distinguishes genuine STEM research positions from IT
+roles that appear alongside STEM keywords on the HH.ru platform. The tier
+pipeline and output schema are documented on ``classify_vacancies``.
 """
 
 from __future__ import annotations
@@ -159,9 +113,7 @@ def _tier2_is_pure_it(title: str | None, description: str | None) -> bool:
         return False
     if not _IT_TITLE_RE.search(title):
         return False
-    if _STEM_KEYWORD_RE.search(description):
-        return False
-    return True
+    return not _STEM_KEYWORD_RE.search(description)
 
 
 def _build_nli_text(title: str | None, description: str | None) -> str:
@@ -232,7 +184,6 @@ def classify_vacancies(config: Config) -> pd.DataFrame:
         write_parquet(result, config.output_dir / "classified.parquet")
         return result
 
-    # Parse JSON blobs.
     parsed = df["data"].apply(json.loads)
 
     vacancy_ids: pd.Series = df["vacancy_id"]
@@ -245,12 +196,11 @@ def classify_vacancies(config: Config) -> pd.DataFrame:
     nli_scores: list[str | None] = [None] * n
 
     # -- Tier 1: professional_role filter ------------------------------------
-    tier2_mask = pd.Series([False] * n)
-    for i in range(n):
-        if _tier1_is_pure_it(role_ids.iloc[i]):
+    tier1_hits = [_tier1_is_pure_it(role_ids.iloc[i]) for i in range(n)]
+    tier2_mask = pd.Series([not hit for hit in tier1_hits])
+    for i, hit in enumerate(tier1_hits):
+        if hit:
             categories[i] = PURE_IT
-        else:
-            tier2_mask.iloc[i] = True
 
     # -- Tier 2: keyword triage ----------------------------------------------
     tier3_indices: list[int] = []
@@ -290,10 +240,9 @@ def classify_vacancies(config: Config) -> pd.DataFrame:
 
             for j, r in enumerate(results):
                 idx = tier3_indices[batch_start + j]
-                scores_dict = dict(zip(r["labels"], r["scores"]))
+                scores_dict = dict(zip(r["labels"], r["scores"], strict=True))
                 ordered_scores = [scores_dict.get(h, 0.0) for h in _NLI_HYPOTHESES]
 
-                # Store full scores as JSON.
                 nli_scores[idx] = json.dumps(
                     {_NLI_HYPOTHESES[k]: ordered_scores[k] for k in range(len(_NLI_HYPOTHESES))},
                     ensure_ascii=False,

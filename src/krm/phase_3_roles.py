@@ -27,7 +27,11 @@ import umap
 from krm.config import Config
 from krm.lib.embeddings import Embedder, build_title_characteristics
 from krm.lib.io import read_parquet, write_parquet
+from krm.lib.llm_role_names import name_roles
 from krm.lib.metrics import compute_clustering_metrics
+
+_EPS = 1e-12
+_RANDOM_SEED = 42
 
 
 def _label_cluster(
@@ -59,7 +63,7 @@ def _label_cluster(
 
     # Embeddings are already L2-normalized by the embedder,
     # so cosine similarity is the dot product with the normalized centroid.
-    centroid_norm = centroid / (np.linalg.norm(centroid) + 1e-12)
+    centroid_norm = centroid / (np.linalg.norm(centroid) + _EPS)
     similarities = cluster_embs @ centroid_norm
     sorted_order = np.argsort(-similarities)  # descending
 
@@ -79,24 +83,12 @@ def _serialize_centroid(emb: np.ndarray) -> bytes:
 def discover_roles(config: Config) -> pd.DataFrame:
     """Discover roles by clustering STEM job titles with HDBSCAN.
 
-    Full pipeline:
-
-    1. Reads ``classified.parquet`` from ``config.output_dir`` and filters
-       rows where ``stem_category == "STEM_RESEARCH"``.
-    2. Extracts unique job titles and generates embeddings via
-       :class:`~src.krm.lib.embeddings.Embedder`.
-    3. Reduces dimensionality with UMAP (cosine metric, ``random_state=42``)
-       using parameters from ``config``.
-    4. Clusters the UMAP-reduced embeddings with HDBSCAN (Euclidean metric)
-       using parameters from ``config``.
-    5. Computes soft membership vectors via
-       ``clusterer.all_points_membership_vectors_`` for interdisciplinary
-       role analysis.
-    6. Names each cluster by its most central job titles (top-3 closest
-       to the centroid in original embedding space).
-    7. Computes silhouette and Davies-Bouldin metrics via
-       :func:`~src.krm.lib.metrics.compute_clustering_metrics`.
-    8. Writes ``roles.parquet`` to ``config.output_dir``.
+    Reads ``classified.parquet``, filters to ``STEM_RESEARCH`` vacancies,
+    embeds unique titles (optionally enriched with characteristic labels),
+    then clusters them via UMAP (cosine) + HDBSCAN (Euclidean). Soft
+    membership vectors are retained for interdisciplinary analysis.
+    Clusters are named by their most central titles, quality metrics are
+    computed, and ``roles.parquet`` is written to ``config.output_dir``.
 
     Args:
         config: Pipeline configuration providing ``embedding_model``,
@@ -116,14 +108,13 @@ def discover_roles(config: Config) -> pd.DataFrame:
         ``member_count``            int — number of unique titles in the role
         ``noise_flag``              bool — ``True`` only for the noise row
         ``characteristic_profile``  str — JSON dict ``{characteristic_id: mean_confidence}``
+        ``llm_role_label``          str — human-readable LLM role name (only when
+                                        ``config.use_llm_phase_3`` is true)
         =========================== ============================================
 
     Raises:
         ValueError: If no ``STEM_RESEARCH`` vacancies exist in the input.
     """
-    # ------------------------------------------------------------------
-    # 1. Load classified data and filter to STEM_RESEARCH
-    # ------------------------------------------------------------------
     classified_path = config.output_dir / "classified.parquet"
     df = read_parquet(classified_path)
 
@@ -132,16 +123,10 @@ def discover_roles(config: Config) -> pd.DataFrame:
         msg = "No STEM_RESEARCH vacancies found in classified.parquet"
         raise ValueError(msg)
 
-    # ------------------------------------------------------------------
-    # 2. Extract unique job titles
-    # ------------------------------------------------------------------
     unique_titles = sorted(df_stem["title"].dropna().unique().tolist())
     n_titles = len(unique_titles)
     print(f"[Phase 3] Clustering {n_titles} unique STEM job titles")
 
-    # ------------------------------------------------------------------
-    # 2a. Text-enrichment grounding via characteristic labels
-    # ------------------------------------------------------------------
     characteristics_path = config.characteristics_path
     characteristics_df: pd.DataFrame | None = None
     enriched_titles: list[str] | None = None
@@ -169,16 +154,10 @@ def discover_roles(config: Config) -> pd.DataFrame:
             f"{characteristics_path} not found (bare titles used)"
         )
 
-    # ------------------------------------------------------------------
-    # 3. Generate embeddings (with optional enrichment)
-    # ------------------------------------------------------------------
     embedder = Embedder(model_name=config.embedding_model)
     embeddings = embedder.encode(unique_titles, enriched_titles=enriched_titles)
     print(f"[Phase 3] Generated embeddings: {embeddings.shape}")
 
-    # ------------------------------------------------------------------
-    # 4. UMAP dimensionality reduction
-    # ------------------------------------------------------------------
     n_components = min(config.umap_n_components, n_titles - 1, embeddings.shape[1])
     if n_components < 2:
         n_components = 2
@@ -187,14 +166,11 @@ def discover_roles(config: Config) -> pd.DataFrame:
         n_components=n_components,
         metric="cosine",
         min_dist=0.0,
-        random_state=42,
+        random_state=_RANDOM_SEED,
     )
     umap_embeddings = reducer.fit_transform(embeddings)
     print(f"[Phase 3] UMAP reduced to {n_components} dimensions")
 
-    # ------------------------------------------------------------------
-    # 5. HDBSCAN clustering
-    # ------------------------------------------------------------------
     min_cluster_size = min(config.hdbscan_min_cluster_size, n_titles // 2)
     if min_cluster_size < 2:
         min_cluster_size = 2
@@ -207,8 +183,8 @@ def discover_roles(config: Config) -> pd.DataFrame:
     )
     labels = clusterer.fit_predict(umap_embeddings)
 
-    # 5a. Soft membership for interdisciplinary support
-    #     (attribute renamed in newer hdbscan versions — fall back gracefully)
+    # Soft membership for interdisciplinary support; the attribute was
+    # renamed in newer hdbscan versions, so fall back gracefully.
     try:
         soft_membership: np.ndarray | None = clusterer.all_points_membership_vectors_
     except AttributeError:
@@ -223,15 +199,9 @@ def discover_roles(config: Config) -> pd.DataFrame:
         f"(soft membership: {soft_membership.shape if soft_membership is not None else 'N/A'})"
     )
 
-    # ------------------------------------------------------------------
-    # 6. Compute clustering quality metrics
-    # ------------------------------------------------------------------
     metrics = compute_clustering_metrics(umap_embeddings, labels)
     print(f"[Phase 3] Clustering metrics: {metrics}")
 
-    # ------------------------------------------------------------------
-    # 7. Build role records
-    # ------------------------------------------------------------------
     roles: list[dict[str, Any]] = []
 
     for cluster_id in sorted(unique_labels):
@@ -276,9 +246,15 @@ def discover_roles(config: Config) -> pd.DataFrame:
 
     roles_df = pd.DataFrame(roles)
 
-    # ------------------------------------------------------------------
-    # 8. Write output
-    # ------------------------------------------------------------------
+    # Post-processing only: name roles via the shared LLM client when opted in.
+    # Clustering, `role_label`, and `centroid_embedding` are never re-run here.
+    if config.use_llm_phase_3:
+        roles_df["llm_role_label"] = name_roles(roles_df, config)
+        n_llm_named = int(
+            (roles_df["llm_role_label"] != roles_df["role_label"]).sum()
+        )
+        print(f"[Phase 3] LLM named {n_llm_named}/{len(roles_df)} roles")
+
     output_path = config.output_dir / "roles.parquet"
     write_parquet(roles_df, output_path)
     print(f"[Phase 3] Wrote {len(roles_df)} roles to {output_path}")

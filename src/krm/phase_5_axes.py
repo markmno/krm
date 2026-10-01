@@ -1,33 +1,27 @@
 """Phase 5: Taxonomy-driven skill-to-characteristic mapping.
 
 Maps each role's skills onto all seven content competency axes (including
-``t_profile`` / Кругозор) as a blend of a curated skill→axis taxonomy tag
-(exact, case-insensitive glossary membership) and cosine similarity to a
-per-axis seed-glossary centroid (``deepvk/USER-bge-m3`` embeddings).  The
-curated tag dominates (0.7) so that the taxonomy grouping
-(stats→data_analysis, computational math→computational, adjacent/erudition
-skills→Кругозор) is authoritative, while the embedding term (0.3) preserves
-semantic nuance for untagged skills.  All seven axes are globally normalized
-across roles (never within-role) to a 1–5 proficiency scale.
-
-Usage:
-    from krm.config import Config
-    from krm.phase_5_axes import map_to_characteristics
-
-    config = Config()
-    characteristic_scores = map_to_characteristics(config)
+``t_profile`` / Кругозор) as ``0.7 * tag + 0.3 * cosine``, where ``tag`` is a
+curated skill→axis taxonomy membership (case-insensitive glossary match, the
+authoritative grouping) and ``cosine`` is similarity to the axis's
+seed-glossary centroid (``deepvk/USER-bge-m3`` embeddings).  All seven axes are
+globally normalized across roles (never within-role) to a 1–5 proficiency
+scale.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import numpy as np
 import pandas as pd
+from pydantic import BaseModel
 
 from krm.config import Config
 from krm.lib.embeddings import Embedder
 from krm.lib.io import read_parquet, write_parquet
+from krm.lib.llm import LLMClient, LLMPrompt, build_llm
 
 _PROF_MIN = 1.0
 _PROF_MAX = 5.0
@@ -35,6 +29,12 @@ _TAG_WEIGHT = 0.7
 _COS_WEIGHT = 0.3
 _MIN_ROLES_FOR_ZSCORE = 15
 _TOP_CONTRIBUTING = 3
+
+
+class AxisTagResponse(BaseModel):
+    """LLM classification of a single skill lemma into one content axis."""
+
+    axis: str
 
 
 def _global_normalize(matrix: np.ndarray) -> np.ndarray:
@@ -92,17 +92,84 @@ def _skill_tag_matrix(
     """
     tags = np.zeros((len(skills), len(axes)), dtype=float)
     axis_to_idx = {axis: j for j, axis in enumerate(axes)}
+    lower_glossaries = {
+        axis: {phrase.strip().lower() for phrase in glossaries.get(axis, [])}
+        for axis in axes
+    }
     for i, skill in enumerate(skills):
         key = skill.strip().lower()
-        hit_axes = [
-            axis
-            for axis in axes
-            if key in {phrase.strip().lower() for phrase in glossaries.get(axis, [])}
-        ]
+        hit_axes = [axis for axis in axes if key in lower_glossaries[axis]]
         if hit_axes:
             for axis in hit_axes:
                 tags[i, axis_to_idx[axis]] = 1.0 / len(hit_axes)
     return tags
+
+
+def _axis_tag_prompts(
+    skills: list[str],
+    axes: list[str],
+    labels: dict[str, str],
+) -> list[LLMPrompt]:
+    """Build one classification prompt per skill, enumerating the candidate axes."""
+    axis_lines = [f"- {axis}: {labels.get(axis, axis)}" for axis in axes]
+    system = (
+        "Ты — эксперт по классификации профессиональных навыков научных "
+        "сотрудников. Отнеси каждый навык ровно к одной оси компетенций из "
+        "списка ниже и верни её id в поле axis.\n"
+        "Оси компетенций:\n" + "\n".join(axis_lines)
+    )
+    return [LLMPrompt(system=system, user=f"Навык: {skill}") for skill in skills]
+
+
+def _llm_axis_tags(
+    client: LLMClient,
+    skills: list[str],
+    axes: list[str],
+    labels: dict[str, str],
+) -> dict[str, str | None]:
+    """Classify each skill into one axis via the LLM, mapping failures to ``None``."""
+    prompts = _axis_tag_prompts(skills, axes, labels)
+    results = asyncio.run(client.run_many(prompts, AxisTagResponse))
+    valid_axes = set(axes)
+    return {
+        skill: (res.axis if res is not None and res.axis in valid_axes else None)
+        for skill, res in zip(skills, results, strict=True)
+    }
+
+
+def _merge_llm_axis_tags(
+    config: Config,
+    skills: list[str],
+    axes: list[str],
+    tag_matrix: np.ndarray,
+) -> np.ndarray:
+    """Fill glossary-untagged skill rows with LLM axis tags.
+
+    Only rows whose curated-glossary membership set is empty (an all-zero tag
+    row, i.e. ``hit_axes`` empty in :func:`_skill_tag_matrix`) are candidates.
+    Already-tagged skills keep their deterministic tag row untouched; an LLM
+    ``None`` result leaves the row untagged so the cosine term is the only
+    signal, exactly as the deterministic path would score it.
+    """
+    if not skills or not axes:
+        return tag_matrix
+
+    untagged = [i for i, row in enumerate(tag_matrix) if float(row.sum()) == 0.0]
+    if not untagged:
+        return tag_matrix
+
+    labels = config.characteristic_labels_ru
+    client = build_llm(config)
+    untagged_skills = [skills[i] for i in untagged]
+    axis_by_skill = _llm_axis_tags(client, untagged_skills, axes, labels)
+
+    merged = tag_matrix.copy()
+    axis_to_idx = {axis: j for j, axis in enumerate(axes)}
+    for i, skill in zip(untagged, untagged_skills, strict=True):
+        axis = axis_by_skill.get(skill)
+        if axis is not None and axis in axis_to_idx:
+            merged[i, axis_to_idx[axis]] = 1.0
+    return merged
 
 
 def _top_contributing(
@@ -130,22 +197,15 @@ def _empty_characteristic_frame() -> pd.DataFrame:
 def map_to_characteristics(config: Config) -> pd.DataFrame:
     """Map skills to competency characteristics via curated tags + embeddings.
 
-    Full pipeline:
+    Reads ``skills_per_role.parquet``, scores each skill against each of the 7
+    content axes as ``0.7 * tag + 0.3 * cosine``, aggregates per-role means,
+    globally normalizes to [1, 5], and writes ``characteristic_scores.parquet``
+    and the skill×axis matrix ``skill_characteristic_scores.parquet``.
 
-    1. Reads ``skills_per_role.parquet``.
-    2. Embeds every unique skill and every axis glossary phrase with
-       ``Embedder(model_name=config.embedding_model)`` (symmetric, no prefix).
-    3. Scores each skill against each of the 7 content axes (including
-       ``t_profile`` / Кругозор) as ``0.7 * tag + 0.3 * cosine``, where
-       ``tag`` is the curated glossary tag (normalized across tagged axes)
-       and ``cosine`` is the similarity to the axis glossary centroid.
-    4. Aggregates each role's per-axis score as the mean of its skills'
-       blended scores (length-normalized by skill count).
-    5. Globally normalizes all 7 axes (z-score, or min-max under 15 roles)
-       to [1, 5].
-    6. Writes ``characteristic_scores.parquet`` (role_id, characteristic_id,
-       proficiency, top_contributing_skills) and the skill×axis score matrix
-       ``skill_characteristic_scores.parquet``.
+    When ``config.use_llm_phase_5`` is true, skills the curated glossary cannot
+    tag (empty ``hit_axes``) are classified into one axis by the shared LLM
+    client and merged into the tag matrix before the cosine blend. The 0.7/0.3
+    weights, the cosine blend, and global normalization are unchanged.
 
     Args:
         config: Pipeline configuration.
@@ -168,6 +228,8 @@ def map_to_characteristics(config: Config) -> pd.DataFrame:
     active_axes = [cid for cid in content_axes if cid in centroids]
 
     tag_matrix = _skill_tag_matrix(unique_skills, active_axes, glossaries)
+    if config.use_llm_phase_5:
+        tag_matrix = _merge_llm_axis_tags(config, unique_skills, active_axes, tag_matrix)
     if unique_skills and active_axes:
         skill_matrix = np.stack([skill_emb_map[s] for s in unique_skills])
         centroid_matrix = np.stack([centroids[c] for c in active_axes])

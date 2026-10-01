@@ -1,13 +1,7 @@
 """LLM-based skill extraction from Russian job-vacancy descriptions.
 
-Calls a locally-served vLLM OpenAI-compatible endpoint (Qwen2.5-7B-Instruct)
-with a structured JSON prompt. vLLM is used instead of loading the model
-directly via transformers, which crashes on the 14 GB checkpoint under the
-bleeding-edge transformers/torch stack.
-
-Usage:
-    from krm.lib.llm_skills import extract_skills
-    skill_lists = extract_skills(["описание вакансии 1", "описание 2", ...])
+Talks to an OpenAI-compatible HTTP endpoint (llama-server / vLLM) with a
+structured JSON prompt.
 """
 
 from __future__ import annotations
@@ -18,9 +12,7 @@ import re
 
 import httpx
 
-_BASE_URL = "http://localhost:8000/v1"
-_MODEL = "Qwen/Qwen2.5-7B-Instruct"
-_CONCURRENCY = 16
+_MAX_DESC_CHARS = 3000
 
 _SYSTEM_PROMPT = (
     "Ты — эксперт по анализу вакансий. Извлеки из описания вакансии все "
@@ -45,19 +37,24 @@ def _parse_skills(text: str) -> list[str]:
 
 
 async def _extract_one(
-    client: httpx.AsyncClient, desc: str, sem: asyncio.Semaphore
+    client: httpx.AsyncClient,
+    desc: str,
+    sem: asyncio.Semaphore,
+    model: str,
+    temperature: float,
+    max_tokens: int,
 ) -> list[str]:
     async with sem:
         resp = await client.post(
             "/chat/completions",
             json={
-                "model": _MODEL,
+                "model": model,
                 "messages": [
                     {"role": "system", "content": _SYSTEM_PROMPT},
-                    {"role": "user", "content": desc[:3000]},
+                    {"role": "user", "content": desc[:_MAX_DESC_CHARS]},
                 ],
-                "temperature": 0.0,
-                "max_tokens": 256,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
             },
         )
         resp.raise_for_status()
@@ -66,13 +63,24 @@ async def _extract_one(
         return _parse_skills(text)
 
 
-def extract_skills(descriptions: list[str]) -> list[list[str]]:
+def extract_skills(
+    descriptions: list[str],
+    *,
+    base_url: str,
+    model: str,
+    concurrency: int = 16,
+    temperature: float = 0.0,
+    max_tokens: int = 256,
+) -> list[list[str]]:
     """Extract skill lists from a batch of Russian vacancy descriptions."""
-    sem = asyncio.Semaphore(_CONCURRENCY)
+    sem = asyncio.Semaphore(concurrency)
 
     async def _run() -> list[list[str]]:
-        async with httpx.AsyncClient(base_url=_BASE_URL, timeout=180.0) as client:
-            tasks = [_extract_one(client, d, sem) for d in descriptions]
+        async with httpx.AsyncClient(base_url=base_url, timeout=180.0) as client:
+            tasks = [
+                _extract_one(client, d, sem, model, temperature, max_tokens)
+                for d in descriptions
+            ]
             return await asyncio.gather(*tasks)
 
     return asyncio.run(_run())

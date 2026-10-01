@@ -352,6 +352,11 @@ class TestExtractSkillsPipeline:
         type(config).skill_extraction_embedding_model = PropertyMock(
             return_value="deepvk/USER-bge-m3"
         )
+        type(config).llm_base_url = PropertyMock(return_value="http://localhost:8080/v1")
+        type(config).llm_model = PropertyMock(return_value="Qwen/Qwen3-8B-Instruct")
+        type(config).llm_concurrency = PropertyMock(return_value=16)
+        type(config).llm_temperature = PropertyMock(return_value=0.0)
+        type(config).llm_max_tokens = PropertyMock(return_value=256)
         return config
 
     def _db(self) -> MagicMock:
