@@ -127,7 +127,10 @@ class LLMClient:
     # -- Decode (3-tier fallback) ------------------------------------------------
 
     async def _decode(self, prompt: LLMPrompt, schema: type[T]) -> T | None:
-        from instructor.core import InstructorRetryException
+        from instructor.core import (
+            IncompleteOutputException,
+            InstructorRetryException,
+        )
         from openai import APIError
 
         raw, instructor_client = self._ensure_clients()
@@ -153,7 +156,7 @@ class LLMClient:
                 max_tokens=self.max_tokens,
             )
             return result
-        except InstructorRetryException as exc:
+        except (InstructorRetryException, IncompleteOutputException) as exc:
             logger.warning("LLM tier-1 (instructor JSON_SCHEMA) failed: {}", exc)
 
         # Tier 2: raw json_object + TypeAdapter validation.

@@ -392,9 +392,9 @@ skill_extraction:
 llm:
   base_url: "http://localhost:8080/v1"   # llama-server default (llama.cpp)
   model: "Qwen/Qwen3.8-27B"
-  concurrency: 16
+  concurrency: 4
   temperature: 0.0
-  max_tokens: 256
+  max_tokens: 2048
   enabled: true                          # master switch for the LLM backend
   max_retries: 2                         # instructor create() retries on validation failure
   response_format: "json_schema"         # structured-output mode (instructor Mode.JSON_SCHEMA)
@@ -405,13 +405,13 @@ llm:
     phase_2b_skills:
       use_llm: true      # already LLM-based (skill extraction)
     phase_2_5_chars:
-      use_llm: false     # deterministic NLI default
+      use_llm: true      # LLM scores 7 characteristics in one call
     phase_5_skill_axis:
-      use_llm: false     # deterministic NLI default
+      use_llm: true      # LLM tags out-of-glossary skills
     phase_5b_soft:
-      use_llm: false     # deterministic rubric default
+      use_llm: true      # LLM scores soft competences (rubric fallback)
     phase_3_naming:
-      use_llm: false     # deterministic naming default
+      use_llm: true      # LLM role names (top-3 titles fallback)
 
 # Proficiency scale (1-5)
 proficiency:
