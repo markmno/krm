@@ -1,0 +1,19 @@
+# Build context exclusions for Dockerfile.krm / docker-compose.yml
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.doit.db.db
+.git/
+.gitignore
+.omo/
+data/
+reports/
+models/
+logs/
+*.duckdb
+*.parquet
+docs/
+scripts/
+tests/

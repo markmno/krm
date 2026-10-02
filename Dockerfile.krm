@@ -1,0 +1,44 @@
+# krm pipeline image — CPU-only.
+#
+# The LLM inference runs in its OWN container (llama-server, GPU) in
+# docker-compose.yml; this container only does scraping / classification /
+# embeddings / clustering / reporting. Keeping it CPU-only means it does NOT
+# need nvidia-container-toolkit and cannot collide with the LLM server for
+# VRAM — which is exactly what caused the earlier numba/torch segfaults and OOM.
+#
+# Note on numba: the intermittent numba 0.65 segfault was reproduced under
+# memory pressure from the 27B llama-server sharing the host. Running CPU-only
+# with a memory cap (see docker-compose.yml `deploy.resources.limits`) removes
+# that pressure. If it EVER segfaults again in this isolated container, pin it
+# explicitly here: `uv pip install "numba==0.63.0" "llvmlite==0.46.0"`.
+
+FROM python:3.12-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+# Build toolchain for native wheels (numba/llvmlite, lxml, etc.)
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv for fast, lockfile-driven installs
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+# --- Layer 1: dependencies (cached unless pyproject.toml / uv.lock change) ---
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+# --- Layer 2: package source + flows + config -------------------------------
+COPY src ./src
+COPY flows ./flows
+COPY config.yaml ./
+RUN uv sync --frozen --no-dev
+
+ENV KRM_CONFIG_PATH=/app/config.yaml
+
+ENTRYPOINT []
+CMD ["python", "-m", "flows.pipeline"]

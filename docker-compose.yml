@@ -1,0 +1,92 @@
+# KRM pipeline — isolated environments.
+#
+# Three services, three isolated concerns (this is what stops the numba/CUDA/OOM
+# cascade that crashed the host when everything shared one venv + one GPU):
+#
+#   1. llama-server  — LLM inference, GPU (CUDA 12.x bundled in the image,
+#                      so the host's CUDA 13.2-vs-13.0 driver mismatch is moot)
+#   2. krm           — the ML pipeline, CPU-only, memory-capped
+#   3. prefect       — orchestrator (UI + scheduler) for the flows
+#
+# GPU passthrough REQUIRES nvidia-container-toolkit (Fedora):
+#   curl -s -L https://nvidia.github.io/libnvidia-container/stable/rpm/nvidia-container-toolkit.repo \
+#     | sudo tee /etc/yum.repos.d/nvidia-container-toolkit.repo
+#   sudo dnf install -y nvidia-container-toolkit
+#   sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+#   sudo systemctl restart docker
+
+services:
+  llama-server:
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    restart: unless-stopped
+    command:
+      - -m
+      - /models/Qwen3-8B-Q4_K_M.gguf
+      - --jinja
+      - -c
+      - "8192"
+      - -ngl
+      - "999"
+      - -np
+      - "8"
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+      - --alias
+      - Qwen/Qwen3-8B
+      - --reasoning-budget
+      - "0"
+    volumes:
+      - /home/markmno/.cache/andr/models/Qwen3-8B-GGUF:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 90s
+    ports:
+      - "127.0.0.1:8080:8080"
+
+  krm:
+    build:
+      context: .
+      dockerfile: Dockerfile.krm
+    image: krm-pipeline:local
+    environment:
+      KRM_CONFIG_PATH: /app/config.yaml
+      # Override the LLM endpoint to reach the llama-server service.
+      LLM_BASE_URL: http://llama-server:8080/v1
+    volumes:
+      - ./data:/app/data
+      - ./reports:/app/reports
+      - ./models:/app/models
+    deploy:
+      resources:
+        limits:
+          memory: 20g          # cap so numba/torch can never OOM the host
+    depends_on:
+      llama-server:
+        condition: service_healthy
+    # One-shot by default; for a scheduled run, `prefect` (below) triggers it.
+    profiles: ["pipeline"]
+
+  prefect:
+    image: prefecthq/prefect:3-python3.12
+    command: ["prefect", "server", "start", "--host", "0.0.0.0"]
+    environment:
+      PREFECT_API_URL: http://prefect:4200/api
+    ports:
+      - "127.0.0.1:4200:4200"
+    volumes:
+      - prefect-data:/root/.prefect
+
+volumes:
+  prefect-data:
