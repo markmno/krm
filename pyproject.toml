@@ -39,6 +39,7 @@ dependencies = [
     "pydantic>=2.9,<3",
     "instructor>=1.6,<2",
     "openai>=1.55",
+    "prefect>=3.8,<4",
 ]
 
 [project.optional-dependencies]
