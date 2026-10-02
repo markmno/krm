@@ -391,7 +391,7 @@ skill_extraction:
 # llama-server (llama.cpp) exposes /v1/chat/completions by default.
 llm:
   base_url: "http://localhost:8080/v1"   # llama-server default (llama.cpp)
-  model: "Qwen/Qwen3.8-27B"
+  model: "Qwen/Qwen3-8B"
   concurrency: 4
   temperature: 0.0
   max_tokens: 2048
